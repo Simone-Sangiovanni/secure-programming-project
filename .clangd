@@ -1,0 +1,14 @@
+CompileFlags:
+  CompilationDatabase: "build"
+
+Diagnostics:
+  ClangTidy:
+    Add: [
+      "bugprone-*",               # Out-of-bounds, use-after-free, logic bugs
+      "cert-*",                   # SEI CERT C Secure Coding Guidelines
+      "security-*",               # Insecure API calls, buffer overflows, format strings
+      "readability-insecure-api*" # Warns against functions like strcpy, sprintf, gets
+    ]
+    Remove: [
+      "readability-magic-numbers" # Suppress overly strict warnings on constant numbers
+    ]

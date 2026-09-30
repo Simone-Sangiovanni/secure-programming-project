@@ -17,16 +17,28 @@ The program allows each system user to maintain a personal and isolated **vault*
 
 On the first run, if the configuration file does not exist, the program guides the user through creating the master password and initializing the config, vault, and log. On subsequent runs, the program requests the master password for access.
 
-## Build
+## Prerequisites & Dependencies (Debian 13)
 
-Requirements:
+To compile this project on Debian 13, ensure you have the following packages installed:
 
-- Debian 13 (or compatible)
-- C23-compliant compiler (e.g., GCC 14+ or recent Clang)
-- libsodium v1.0.18 (headers and development library)
+- **GCC**: `14.2` (supports C23 standard required by `CMakeLists.txt`)
+- **CMake**: `>= 3.21` (Debian 13 provides `3.31`)
+- **Ninja**: Build tool specified in `.vscode/settings.json`
+- **pkg-config**: Required to locate `libsodium`
+- **libsodium-dev**: Cryptographic library development headers
+
+### Installation Command
 
 ```bash
-sudo apt install libsodium-dev
+sudo apt update
+sudo apt install build-essential gcc cmake ninja-build pkg-config libsodium-dev
+```
+
+## Build
+
+```bash
+cmake -B build -G Ninja
+cmake --build build
 ```
 
 ## Run
