@@ -36,10 +36,18 @@ pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 # Add every new source file here
 set(SFM_SOURCES
     src/main.c
+    src/cli/cli.c
+    # src/init/init.c   # uncomment once it exists
 )
 
 add_executable(sfm ${SFM_SOURCES})
 target_link_libraries(sfm PRIVATE PkgConfig::SODIUM)
+
+# Lets sources use #include "cli.h" / "init.h" regardless of subdirectory
+target_include_directories(sfm PRIVATE
+    src/cli
+    src/init
+)
 
 # Position Independent Executable (ASLR). With CMake >= 3.14 (policy CMP0083,
 # enabled by the minimum version above) this adds both -fPIE and -pie.
@@ -47,9 +55,10 @@ include(CheckPIESupported)
 check_pie_supported(LANGUAGES C)
 set_target_properties(sfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Uncomment if strict ISO mode (extensions OFF) hides POSIX functions
-# such as getline() or fileno():
-# target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L)
+# Strict ISO mode (extensions OFF) hides POSIX declarations such as getopt,
+# optind, opterr, optopt, getline() or fileno(). Request them explicitly.
+# This also reaches clangd through compile_commands.json.
+target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L)
 
 # ---------------------------------------------------------------------------
 # Warnings
