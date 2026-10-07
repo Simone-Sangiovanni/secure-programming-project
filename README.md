@@ -42,7 +42,18 @@ cmake --build build
 ```
 
 ## Run
+Initialize the folders and files:
+```bash
+chmod +x basic_setup.sh reset.sh
+./basic_setup.sh
+```
 
+In case you want to delete all the folders and files created during initialization:
+```bash
+./reset.sh
+```
+
+Execution:
 ```bash
 ./sfm
 sfm> command <argument>
