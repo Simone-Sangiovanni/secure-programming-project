@@ -1,0 +1,8 @@
+{
+  "kdf": "argon2id",
+  "salt": "",
+  "verifier": "",
+  "vault": "$VAULT_DIR/",
+  "log": "$LOG_FILE",
+  "config": "$CONFIG_FILE"
+}

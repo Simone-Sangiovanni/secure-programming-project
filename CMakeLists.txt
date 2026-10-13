@@ -29,6 +29,7 @@ option(WARNINGS_AS_ERRORS  "Treat compiler warnings as errors"   OFF)
 # ---------------------------------------------------------------------------
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+pkg_check_modules(CJSON  REQUIRED IMPORTED_TARGET libcjson)
 
 # ---------------------------------------------------------------------------
 # Target
@@ -37,11 +38,16 @@ pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 set(SFM_SOURCES
     src/main.c
     src/cli/cli.c
+    src/config/config.c
     # src/init/init.c   # uncomment once it exists
 )
 
-add_executable(sfm ${SFM_SOURCES})
-target_link_libraries(sfm PRIVATE PkgConfig::SODIUM)
+add_executable(sfm ${SFM_SOURCES}
+    src/config/config.h)
+target_link_libraries(sfm PRIVATE 
+    PkgConfig::SODIUM
+    PkgConfig::CJSON    
+)
 
 # Lets sources use #include "cli.h" / "init.h" regardless of subdirectory
 target_include_directories(sfm PRIVATE
