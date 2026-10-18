@@ -1,9 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sodium.h>
+
+#include "auth/auth.h"
 #include "cli/cli.h"
 #include "config/config.h"
 
-#define DEFAULT_CONFIG_PATH "config.json"  // later: ~/.config/sfm/config.json
+#ifndef DEFAULT_CONFIG_PATH
+#define DEFAULT_CONFIG_PATH "/home/echo-00/Desktop/projects/secure-programming-project/config.json"  // TODO: move to ~/.config/sfm/config.json
+#endif
 
 int main(int argc, char *argv[]) {
     const CliStatus status = cli_parse(argc, argv);
@@ -11,72 +16,46 @@ int main(int argc, char *argv[]) {
     switch (status) {
         case CLI_EXIT_SUCCESS: return EXIT_SUCCESS;
         case CLI_ERROR: return EXIT_FAILURE;
-        case CLI_OK: break; // proceed to run sfm
+        case CLI_OK: break;  // proceed to run sfm
     }
 
     printf("Starting %s...\n", program_name);
 
+    // Load the config file; if it does not exist yet, start from defaults.
     SfmConfig cfg;
     const ConfigStatus cs = load_config(DEFAULT_CONFIG_PATH, &cfg);
 
     if (cs == CONFIG_ERR_NOT_FOUND) {
-        if (config_set_defaults(&cfg, DEFAULT_CONFIG_PATH) != CONFIG_OK) return EXIT_FAILURE;
+        if (config_set_defaults(&cfg, DEFAULT_CONFIG_PATH) != CONFIG_OK) {
+            (void)fprintf(stderr, "Cannot create default configuration.\n");
+            return EXIT_FAILURE;
+        }
     } else if (cs != CONFIG_OK) {
         (void)fprintf(stderr, "Cannot load config (error %d)\n", (int)cs);
         return EXIT_FAILURE;
     }
 
+    // Authenticate: create the master password on first run, log in otherwise.
+    // On success `key` holds the file-encryption key.
+    unsigned char key[AUTH_KEY_BYTES] = {};
+    AuthStatus as;
+
     if (config_is_first_run(&cfg)) {
-        // init(&cfg);   // set master password, save_config
+        printf("No master password set. Let's create one.\n");
+        as = auth_setup_master_password(&cfg, key);  // also saves the config file
     } else {
-        // login(&cfg);  // verify master password
+        as = auth_login(&cfg, key);
     }
 
+    if (as != AUTH_OK) {
+        (void)fprintf(stderr, "Authentication failed: %s\n", auth_strerror(as));
+        return EXIT_FAILURE;
+    }
+    printf("Authenticated.\n");
+
+    // TODO: run the command chosen on the command line (encrypt / decrypt ...)
+    //       using `key`.
+
+    sodium_memzero(key, sizeof key);  // wipe the key before exiting
     return EXIT_SUCCESS;
 }
-
-/*
-#include <stdio.h>
-#include <stdlib.h>
-#include "init.h"
-
-int main(void) {
-    DirStatus status = setup_sfm_directory();
-
-    switch (status) {
-        case DIR_SUCCESS:
-            printf("Success: Created 'sfm' directory inside '~/.config'.\n");
-            return EXIT_SUCCESS;
-
-        case DIR_ERR_HOME_NOT_FOUND:
-            fprintf(stderr, "Error: Unable to determine home directory.\n");
-            break;
-
-        case DIR_ERR_PATH_TOO_LONG:
-            fprintf(stderr, "Error: Home directory path exceeds maximum supported length.\n");
-            break;
-
-        case DIR_ERR_CONFIG_MISSING:
-            fprintf(stderr, "Error: '~/.config' directory does not exist.\n");
-            break;
-
-        case DIR_ERR_CONFIG_NOT_DIR:
-            fprintf(stderr, "Error: '~/.config' exists but is not a directory.\n");
-            break;
-
-        case DIR_ERR_CONFIG_ACCESS:
-            fprintf(stderr, "Error: Lacking permissions to access '~/.config'.\n");
-            break;
-
-        case DIR_ERR_SFM_EXISTS:
-            fprintf(stderr, "Notice: Directory 'sfm' already exists inside '~/.config'.\n");
-            break;
-
-        case DIR_ERR_CREATE_FAILED:
-            fprintf(stderr, "Error: Failed to create 'sfm' directory.\n");
-            break;
-    }
-
-    return EXIT_FAILURE;
-}
-*/

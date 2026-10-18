@@ -39,11 +39,13 @@ set(SFM_SOURCES
     src/main.c
     src/cli/cli.c
     src/config/config.c
+    src/auth/auth.c
     # src/init/init.c   # uncomment once it exists
 )
 
 add_executable(sfm ${SFM_SOURCES}
-    src/config/config.h)
+    src/config/config.h
+    src/auth/auth.h)
 target_link_libraries(sfm PRIVATE 
     PkgConfig::SODIUM
     PkgConfig::CJSON    
@@ -52,6 +54,7 @@ target_link_libraries(sfm PRIVATE
 # Lets sources use #include "cli.h" / "init.h" regardless of subdirectory
 target_include_directories(sfm PRIVATE
     src/cli
+    src/auth
     src/init
 )
 
