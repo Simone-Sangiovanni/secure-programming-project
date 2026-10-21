@@ -56,6 +56,10 @@ int main(int argc, char *argv[]) {
     // TODO: run the command chosen on the command line (encrypt / decrypt ...)
     //       using `key`.
 
+    // Interactive shell: runs until the user types `exit` (or presses Ctrl-D).
+    const CommandContext ctx = {.cfg = &cfg, .key = &key};
+    const CliStatus shell_status = cli_run(&ctx);
+
     sodium_memzero(key, sizeof key);  // wipe the key before exiting
     return EXIT_SUCCESS;
 }

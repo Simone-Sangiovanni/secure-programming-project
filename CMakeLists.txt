@@ -45,7 +45,8 @@ set(SFM_SOURCES
 
 add_executable(sfm ${SFM_SOURCES}
     src/config/config.h
-    src/auth/auth.h)
+    src/auth/auth.h
+    src/commands/commands.c)
 target_link_libraries(sfm PRIVATE 
     PkgConfig::SODIUM
     PkgConfig::CJSON    
