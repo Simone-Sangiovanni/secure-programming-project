@@ -224,3 +224,105 @@ static bool execute_line(const CommandContext *ctx, char *line) {
     }
     return true;
 }
+
+// Signals ignored while the shell runs: Ctrl-C, Ctrl-\ and Ctrl-Z
+static const int ignored_signals[] = {SIGINT, SIGQUIT, SIGTSTP};
+
+/**
+ * @brief Makes the process ignore the keyboard signals that would stop it.
+ *
+ *  - SIGINT  (Ctrl-C):  would terminate the program.
+ *  - SIGQUIT (Ctrl-\):  would terminate it and may write a core dump, which
+ *                       could contain the encryption key.
+ *  - SIGTSTP (Ctrl-Z):  would suspend it, leaving the key in memory of a
+ *                       stopped process.
+ *
+ * The signals stay ignored until the process exits (so that main can still
+ * wipe the key without being interrupted). SIGTERM, SIGHUP and SIGKILL are
+ * deliberately NOT blocked: the system and the user must still be able to
+ * stop the program from outside (closing the terminal, `kill`).
+ *
+ * @return true on success, false if a signal could not be ignored.
+ */
+static bool ignore_keyboard_signals(void) {
+    struct sigaction ignore = {}; // initialize signal action
+    ignore.sa_handler = SIG_IGN; // tells the OS to ignore the incoming signals
+    sigemptyset(&ignore.sa_mask); // clears any additional signals that would be blocked while handling this setup
+
+    // itherate through the signals
+    for (size_t i = 0; i < sizeof ignored_signals / sizeof ignored_signals[0]; i++) {
+        // Applies the ignore behavior to each signal
+        if (sigaction(ignored_signals[i], &ignore, nullptr) != 0) return false; 
+    }
+    return true;
+}
+
+/**
+ * @brief The read-parse-execute loop. Returns only when the user types `exit`
+ *        or when the input is lost for good.
+ *
+ * Ctrl-D is ignored. At the start of a line it only produces an "end of
+ * input" condition, which is cleared, and a hint is printed. In the middle
+ * of a line it has no effect at all (the C library keeps reading until the
+ * newline).
+ *
+ * @return CLI_EXIT_SUCCESS after `exit`; CLI_ERROR if reading failed or stdin
+ *         is no longer a terminal (e.g. the terminal was closed), because
+ *         without input the loop could never end.
+ */
+static CliStatus shell_loop(const CommandContext *ctx) {
+    printf("Type 'help' for the list of commands, 'exit' to quit.\n");
+    
+    char line[CLI_LINE_MAX];
+    while (true) {
+        // print the '>' prompt sign and immediately flush the output stream to make it appear in the screen right away
+        (void)fputs(CLI_PROMPT, stdout);
+        (void)fflush(stdout);
+
+        // reads the line up to CLI_LINE_MAX characters. if nullptr it means there has been an error
+        if (fgets(line, sizeof line, stdin) == nullptr) {
+            if (ferror(stdin)) {
+                (void)fprintf(stderr, "Error reading input.\n");
+                return CLI_ERROR;
+            }
+            // End of input. On a live terminal this is just Ctrl-D: ignore it.
+            // If stdin is not a terminal any more, no input will ever come
+            // again, so looping would spin forever: stop instead.
+            if (!isatty(STDIN_FILENO)) {
+                (void)fprintf(stderr, "\nInput closed.\n");
+                return CLI_ERROR;
+            }
+            // Resets the error flags and the EOF indicator for the given file stream
+            clearerr(stdin);
+            printf("\nUse 'exit' to quit.\n");
+            continue;
+        }
+
+        // find '\n' and replace it with '\0'
+        const size_t len = strcspn(line, "\n");
+        if (line[len] == '\n') {
+            line[len] = '\0';
+        } else if (len == sizeof line - 1) {
+            // buffer full and no newline: prevent buffer overflow capturing the remaining characters and re-ask for the input
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF ) { /* discard the rest*/ }
+            (void)fprintf(stderr, "Line too long (max %d characters)", CLI_LINE_MAX -1);
+            continue;
+        } else {
+            continue; // partial line cut short by end of input; ignore it
+        }
+
+        // passes the command line string to the execution logic
+        if (!execute_line(ctx, line)) return CLI_EXIT_SUCCESS;
+    }
+}
+
+CliStatus cli_run(const CommandContext *ctx) {
+    if (ctx == nullptr) return CLI_ERROR;
+
+    if (!ignore_keyboard_signals()) {
+        (void) fprintf(stderr, "Cannot protect the shell from interruption.\n");
+        return CLI_ERROR;
+    }
+    return shell_loop(ctx);
+}

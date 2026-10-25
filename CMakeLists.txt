@@ -68,7 +68,7 @@ set_target_properties(sfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Strict ISO mode (extensions OFF) hides POSIX declarations such as getopt,
 # optind, opterr, optopt, getline() or fileno(). Request them explicitly.
 # This also reaches clangd through compile_commands.json.
-target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L)
+target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L DEFAULT_CONFIG_PATH="${CMAKE_SOURCE_DIR}/config.json")
 
 # ---------------------------------------------------------------------------
 # Warnings
