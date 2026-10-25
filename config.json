@@ -1,7 +1,0 @@
-{
-	"kdf":	"argon2id",
-	"salt":	"cJB8WZKOYuvhavVOCbMYyw==",
-	"verifier":	"LrJarUWkkEBAEFOL0oyirdOZLeQ9CJHr2HGLctCdhzk=",
-	"vault":	"sfm_vault",
-	"log":	"sfm.log"
-}
