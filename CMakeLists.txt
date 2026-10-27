@@ -40,13 +40,20 @@ set(SFM_SOURCES
     src/cli/cli.c
     src/config/config.c
     src/auth/auth.c
+    src/commands/commands.c
+    src/cipher/cipher.c
+    src/fileio/fileio.c
+    src/validate/validate.c
     # src/init/init.c   # uncomment once it exists
 )
 
 add_executable(sfm ${SFM_SOURCES}
     src/config/config.h
     src/auth/auth.h
-    src/commands/commands.c)
+    src/commands/commands.c
+    src/cipher/cipher.c
+    src/fileio/fileio.c
+    src/validate/validate.h)
 target_link_libraries(sfm PRIVATE 
     PkgConfig::SODIUM
     PkgConfig::CJSON    

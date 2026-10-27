@@ -22,7 +22,7 @@ typedef struct {
 typedef enum {
     CMD_OK = 0,                 /**< The command succeeded. */
     CMD_ERR_NOT_IMPLEMENTED,    /**< The command exists but is not written yet. */
-    CMD_ERR_FAILED              /**< The command failed (details printed by the command). */
+    CMD_ERR_FAILED              /**< The command failed (details already printed by the command). */
 } CommandStatus;
 
 /**
@@ -32,16 +32,28 @@ typedef enum {
  */
 typedef CommandStatus (*CommandHandler)(const CommandContext *ctx, int argc, char *argv[]);
 
-/** list: lists the encrypted files in the vault. Takes no arguments. */
+/** list: lists the encrypted files in the vault. Takes no arguments. (not implemented yet) */
 [[nodiscard]] CommandStatus cmd_list(const CommandContext *ctx, int argc, char *argv[]);
 
-/** encrypt <absolute_path>: encrypts the file at the given path. */
+/**
+ * encrypt <absolute_path>: encrypts ONE file.
+ *
+ * Reads the file, encrypts it with ctx->key and writes "<path>.sfm" next to
+ * it. The original file is left untouched, and an existing "<path>.sfm" is
+ * never overwritten.
+ */
 [[nodiscard]] CommandStatus cmd_encrypt(const CommandContext *ctx, int argc, char *argv[]);
 
-/** decrypt <absolute_path>: decrypts the file at the given path. */
+/**
+ * decrypt <absolute_path>: decrypts ONE file whose name ends in ".sfm".
+ *
+ * Writes the plaintext to the same path without the ".sfm" suffix. Nothing is
+ * written if the key is wrong or the file was modified, and an existing
+ * output file is never overwritten.
+ */
 [[nodiscard]] CommandStatus cmd_decrypt(const CommandContext *ctx, int argc, char *argv[]);
 
-/** secure_delete <file_name>: securely deletes a file from the vault. */
+/** secure_delete <file_name>: securely deletes a file from the vault. (not implemented yet) */
 [[nodiscard]] CommandStatus cmd_secure_delete(const CommandContext *ctx, int argc, char *argv[]);
 
 /** Returns a human-readable message for a CommandStatus (never NULL). */
