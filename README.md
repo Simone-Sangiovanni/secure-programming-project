@@ -8,12 +8,13 @@ The program allows each system user to maintain a personal and isolated **vault*
 
 ## Available Commands
 
-| Command                                                           | Description                                                                                              |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `list`                                                            | Lists the files present in the user's vault                                                              |
-| `encrypt <absolute-path>`                                         | Encrypts the specified file and places it in the vault; the original source is securely removed        |
-| `decrypt <file-name-in-vault> <absolute-destination-directory>`  | Copies the decrypted file from the vault to the specified destination; the encrypted copy remains in the vault |
-| `delete <file-name-in-vault>`                                     | Securely deletes (secure delete) a file from the vault                                                   |
+| Command | Description |
+| - | - |
+| `list` | Lists the files present in the user's vault |
+| `encrypt <absolute-path>` | Encrypts the specified file and places it in the vault; the original source is securely removed |
+| `decrypt <file-name-in-vault> <absolute-destination-directory>` | Copies the decrypted file from the vault to the specified destination; the encrypted copy remains in the vault |
+| `secure_delete <file-name-in-vault>` | Securely deletes (secure delete) a file from the vault |
+| `exit` | Quit the program
 
 On the first run, if the configuration file does not exist, the program guides the user through creating the master password and initializing the config, vault, and log. On subsequent runs, the program requests the master password for access.
 
@@ -26,12 +27,13 @@ To compile this project on Debian 13, ensure you have the following packages ins
 - **Ninja**: Build tool specified in `.vscode/settings.json`
 - **pkg-config**: Required to locate `libsodium`
 - **libsodium-dev**: Cryptographic library development headers
+- **libcjson-dev**: Json parsing library
 
 ### Installation Command
 
 ```bash
 sudo apt update
-sudo apt install build-essential gcc cmake ninja-build pkg-config libsodium-dev
+sudo apt install build-essential gcc cmake ninja-build pkg-config libsodium-dev libcjson-dev
 ```
 
 ## Build
@@ -62,12 +64,19 @@ sfm> command <argument>
 Example:
 
 ```bash
-sfm> encrypt /home/username/documents/report.pdf
+sfm> encrypt "/home/username/documents/report.pdf"
 sfm> list
-sfm> decrypt report.pdf.enc /home/username/desktop/
-sfm> delete report.pdf.enc
+sfm> decrypt "report.pdf.sfm"
+sfm> secure_delete "report.pdf.sfm"
 ```
+*list* and *secure_delete* are not implemented yet
 
 ## Project Status
 
-Repository in the early development phase — Checkpoint 1 (threat model and architecture). See `secure-file-manager-design.md` for the complete design document, threat model, and technical details.
+Repository in the second development phase — Checkpoint 2.
+See `secure-file-manager-design.md` for the complete design document, threat model, and technical details.
+
+## Notes
+
+- Currently the program is able to handle files whose size is up to 64 MiB. In future the maximum file size will be increased.
+- Currently there is no vault. Files are simply encrypted and decrypted on the spot. In future the centralized storage will be implemented.
