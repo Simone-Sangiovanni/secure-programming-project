@@ -18,7 +18,8 @@ typedef enum {
     VALIDATE_ERR_EMPTY,        /**< NULL or empty string. */
     VALIDATE_ERR_NOT_ABSOLUTE, /**< Does not start with '/'. */
     VALIDATE_ERR_TOO_LONG,     /**< Longer than VALIDATE_PATH_MAX - 1 bytes. */
-    VALIDATE_ERR_NOT_A_FILE    /**< Ends with '/', so it names a directory. */
+    VALIDATE_ERR_NOT_A_FILE,    /**< Ends with '/', so it names a directory. */
+    VALIDATE_ERR_TRAVERSAL    /**< Path contains traversal components (.. or .) */
 } ValidateStatus;
 
 /**

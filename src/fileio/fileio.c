@@ -12,7 +12,7 @@
 FileIoStatus fileio_read_all(const char *path, unsigned char **data, size_t *len) {
     if (path == nullptr || data == nullptr || len == nullptr) return FILEIO_ERR_ARGS;
 
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return (errno == ENOENT) ? FILEIO_ERR_NOT_FOUND : FILEIO_ERR_OPEN;
 
     // Ask the already-open file (not the path) about itself: no race between

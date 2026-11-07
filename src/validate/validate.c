@@ -13,6 +13,13 @@ ValidateStatus validate_absolute_path(const char *path) {
     if (len >= VALIDATE_PATH_MAX) return VALIDATE_ERR_TOO_LONG;
     if (path[len - 1] == '/') return VALIDATE_ERR_NOT_A_FILE;
 
+    // Prevent directory traversal (e.g., "../" or trailing "..")
+    if (strstr(path, "/../") != nullptr || strstr(path, "/./") != nullptr ||
+        (len >= 3 && strcmp(path + len - 3, "/..") == 0) ||
+        (len >= 2 && strcmp(path + len - 2, "/.") == 0)) {
+        return VALIDATE_ERR_TRAVERSAL;
+    }
+
     return VALIDATE_OK;
 }
 
@@ -23,6 +30,7 @@ const char *validate_strerror(ValidateStatus status) {
         case VALIDATE_ERR_NOT_ABSOLUTE: return "path must be absolute (start with '/')";
         case VALIDATE_ERR_TOO_LONG:     return "path is too long";
         case VALIDATE_ERR_NOT_A_FILE:   return "path must name a file, not a directory";
+        case VALIDATE_ERR_TRAVERSAL: return "path contains traversal components (.. or .)";
     }
     return "unknown error";
 }
