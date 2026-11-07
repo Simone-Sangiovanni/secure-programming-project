@@ -63,30 +63,47 @@ FileIoStatus fileio_read_all(const char *path, unsigned char **data, size_t *len
 
 FileIoStatus fileio_write_new(const char *path, const unsigned char *data, size_t len) {
     if (path == nullptr || (data == nullptr && len > 0)) return FILEIO_ERR_ARGS;
-
-    // O_EXCL: fail if it exists (also refuses to follow a symlink planted there).
-    // TODO(security): write to a temp file + rename() for an atomic result.
-    const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
-    if (fd < 0) return (errno == EEXIST) ? FILEIO_ERR_EXISTS : FILEIO_ERR_OPEN;
-
+ 
+    // 1. Unique, random temp name in the SAME directory (a rename/link across
+    //    directories or file systems would not be atomic). mkstemp creates it
+    //    with O_EXCL and permissions 0600, and never collides with leftovers.
+    char tmp_path[4096 + 16];
+    const int n = snprintf(tmp_path, sizeof tmp_path, "%s.XXXXXX", path);
+    if (n < 0 || (size_t)n >= sizeof tmp_path) return FILEIO_ERR_OPEN;  // path too long
+ 
+    const int fd = mkstemp(tmp_path);
+    if (fd < 0) return FILEIO_ERR_OPEN;
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+ 
+    // 2. Write loop.
     bool ok = true;
     size_t done = 0;
     while (done < len) {
-        const ssize_t n = write(fd, data + done, len - done);
-        if (n < 0) {
+        const ssize_t w = write(fd, data + done, len - done);
+        if (w < 0) {
             if (errno == EINTR) continue;
             ok = false;
             break;
         }
-        done += (size_t)n;
+        done += (size_t)w;
     }
-    if (ok && fsync(fd) != 0) ok = false;   // make sure the data reached the disk
-    if (close(fd) != 0) ok = false;         // close can report deferred write errors
-
+ 
+    // 3. Flush to disk and close (close can report deferred write errors).
+    if (ok && fsync(fd) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
     if (!ok) {
-        (void)unlink(path);  // do not leave a half-written file behind
+        (void)unlink(tmp_path);
         return FILEIO_ERR_WRITE;
     }
+ 
+    // 4. Publish WITHOUT replacing. link() fails atomically with EEXIST if
+    //    `path` already exists (rename() would silently overwrite it).
+    if (link(tmp_path, path) != 0) {
+        const int err = errno;
+        (void)unlink(tmp_path);
+        return (err == EEXIST) ? FILEIO_ERR_EXISTS : FILEIO_ERR_WRITE;
+    }
+    (void)unlink(tmp_path);  // the data now lives under its final name
     return FILEIO_OK;
 }
 
