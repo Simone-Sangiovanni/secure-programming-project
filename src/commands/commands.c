@@ -3,8 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../cipher/cipher.h"
-#include "../fileio/fileio.h"
+#include "../filecrypt/filecrypt.h"
 #include "../validate/validate.h"
 
 #define ENCRYPTED_EXT     ".sfm"
@@ -46,12 +45,29 @@ static const char *build_output_path(char *out, size_t out_size, const char *pat
 }
 
 /**
+ * @brief Prints why an encrypt/decrypt operation failed.
+ *
+ * @param cmd_name "encrypt" or "decrypt".
+ * @param in_path  Input path (blamed for input-side errors).
+ * @param out_path Output path (blamed for output-side errors).
+ * @param result   The failed result.
+ */
+static void print_failure(const char *cmd_name, const char *in_path, const char *out_path,
+                          FileCryptResult result) {
+    if (result.io != FILEIO_OK) {
+        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name,
+                      result.io_on_output ? out_path : in_path, fileio_strerror(result.io));
+    } else {
+        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name, in_path, cipher_strerror(result.cipher));
+    }
+}
+
+/**
  * @brief Shared implementation of encrypt and decrypt for a single file.
  *
- * Steps: validate path -> derive output path -> read file -> encrypt/decrypt
- * in memory -> write the NEW output file. The input buffer is wiped as soon
- * as it is no longer needed, and the output buffer right after writing.
- * Errors are printed here, so callers only get CMD_ERR_FAILED.
+ * Steps: validate path -> derive output path -> stream the file through the
+ * cipher (see filecrypt). Errors are printed here, so callers only get
+ * CMD_ERR_FAILED.
  *
  * @param ctx        Command context (needs ctx->key).
  * @param cmd_name   "encrypt" or "decrypt", used in messages.
@@ -76,28 +92,10 @@ static CommandStatus process_file(const CommandContext *ctx, const char *cmd_nam
         return CMD_ERR_FAILED;
     }
 
-    unsigned char *input = nullptr;
-    size_t input_len = 0;
-    const FileIoStatus rs = fileio_read_all(path, &input, &input_len);
-    if (rs != FILEIO_OK) {
-        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name, path, fileio_strerror(rs));
-        return CMD_ERR_FAILED;
-    }
-
-    unsigned char *output = nullptr;
-    size_t output_len = 0;
-    const CipherStatus cs = encrypting ? cipher_encrypt(ctx->key, input, input_len, &output, &output_len)
-                                       : cipher_decrypt(ctx->key, input, input_len, &output, &output_len);
-    cipher_free(input, input_len);  // may be plaintext: wipe it
-    if (cs != CIPHER_OK) {
-        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name, path, cipher_strerror(cs));
-        return CMD_ERR_FAILED;
-    }
-
-    const FileIoStatus ws = fileio_write_new(out_path, output, output_len);
-    cipher_free(output, output_len);  // may be plaintext: wipe it
-    if (ws != FILEIO_OK) {
-        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name, out_path, fileio_strerror(ws));
+    const FileCryptResult result = encrypting ? filecrypt_encrypt(ctx->key, path, out_path)
+                                              : filecrypt_decrypt(ctx->key, path, out_path);
+    if (!filecrypt_ok(result)) {
+        print_failure(cmd_name, path, out_path, result);
         return CMD_ERR_FAILED;
     }
 

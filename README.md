@@ -77,6 +77,4 @@ Repository in the second development phase — Checkpoint 2.
 See `secure-file-manager-design.md` for the complete design document, threat model, and technical details.
 
 ## Notes
-
-- Currently the program is able to handle files whose size is up to 64 MiB. In future the maximum file size will be increased.
 - Currently there is no vault. Files are simply encrypted and decrypted on the spot. In future the centralized storage will be implemented.
