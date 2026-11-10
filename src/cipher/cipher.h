@@ -27,8 +27,16 @@
  * This module only transforms memory buffers; it never touches files.
  */
 
-/** Plaintext bytes per chunk: 128 KiB. */
-#define CIPHER_CHUNK_SIZE (128U * 1024U)
+/**
+ * Plaintext bytes per chunk: 128 KiB = 131072.
+ *
+ * Written as a plain literal on purpose: an expression like (128U * 1024U)
+ * is a multiplication done in 32-bit unsigned int, and every place that
+ * uses the macro in a 64-bit context (size_t, uint64_t) would trigger
+ * clang-tidy's bugprone-implicit-widening-of-multiplication-result.
+ * cipher.c has a static_assert that checks the value.
+ */
+#define CIPHER_CHUNK_SIZE 131072U
 
 /** Authentication tag added to every chunk. */
 #define CIPHER_TAG_BYTES 17U

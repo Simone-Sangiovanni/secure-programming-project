@@ -13,6 +13,7 @@
 
 static_assert(CIPHER_KEY_BYTES == crypto_secretstream_xchacha20poly1305_KEYBYTES,
               "key size mismatch");
+static_assert(CIPHER_CHUNK_SIZE == 128 * 1024, "the chunk size must be 128 KiB");
 static_assert(CIPHER_TAG_BYTES == crypto_secretstream_xchacha20poly1305_ABYTES,
               "tag size mismatch");
 static_assert(CIPHER_HEADER_BYTES == AD_LEN + crypto_secretstream_xchacha20poly1305_HEADERBYTES,
