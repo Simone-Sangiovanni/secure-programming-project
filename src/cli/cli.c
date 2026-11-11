@@ -1,5 +1,5 @@
 #include <stddef.h>
-#define _POSIX_C_SOURCE 200809L  // for getopt / optind / optopt with -std=c23
+#define _POSIX_C_SOURCE 200809L  // unlock POSIX features defined up to the September 2008 (POSIX.1-2008 / Issue 7) -> unistd.h
 
 #include "cli.h"
 
@@ -31,8 +31,8 @@ CliStatus cli_parse(int argc, char **argv) {
         return CLI_OK;
     }
 
-    opterr = 0;
-    optind = 1;
+    opterr = 0; // disable getopt error messages
+    optind = 1; // tracks which element of argv will be processed next: skip argv[0] that is the program's name
 
     bool want_help = false;
     bool want_version = false;
@@ -43,7 +43,7 @@ CliStatus cli_parse(int argc, char **argv) {
             case 'h': want_help = true; break;
             case 'v': want_version = true; break;
             default:
-                (void)fprintf(stderr, "Error, invalid option '-%c'\n", optopt);
+                (void)fprintf(stderr, "Error, invalid option '-%c'\n", optopt); //optopt holds the unknown flag
                 cli_print_help();
                 return CLI_ERROR;
         }
