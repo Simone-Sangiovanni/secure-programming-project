@@ -1,14 +1,17 @@
+#define _POSIX_C_SOURCE 200809L  // mkstemp, fsync
+
 #include "config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <cjson/cJSON.h>
 
 #define CONFIG_MAX_FILE_SIZE (64L * 1024L) // 64 Kb - max config file size allowed
 #define CONFIG_DEFAULT_KDF   "argon2id"
-#define CONFIG_DEFAULT_VAULT "sfm_vault"
-#define CONFIG_DEFAULT_LOG   "sfm.log"
 
 
 
@@ -112,13 +115,16 @@ bool config_is_first_run(const SfmConfig *cfg) {
  * Builds the defaults in a zeroed temporary struct and copies it to @p cfg
  * only if every field fitted, so @p cfg is never left partially initialised.
  */
-ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path) {
-    if (cfg == nullptr || config_path == nullptr) return CONFIG_ERR_ARGS;
+ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
+                                 const char *vault_path, const char *log_path) {
+    if (cfg == nullptr || config_path == nullptr || vault_path == nullptr || log_path == nullptr) {
+        return CONFIG_ERR_ARGS;
+    }
 
     SfmConfig tmp = {};  // C23: zero-initialises every field
     if (!copy_str(tmp.kdf, sizeof tmp.kdf, CONFIG_DEFAULT_KDF) ||
-        !copy_str(tmp.vault_path, sizeof tmp.vault_path, CONFIG_DEFAULT_VAULT) ||
-        !copy_str(tmp.log_path, sizeof tmp.log_path, CONFIG_DEFAULT_LOG) ||
+        !copy_str(tmp.vault_path, sizeof tmp.vault_path, vault_path) ||
+        !copy_str(tmp.log_path, sizeof tmp.log_path, log_path) ||
         !copy_str(tmp.config_path, sizeof tmp.config_path, config_path)) {
         return CONFIG_ERR_INVALID;
     }
@@ -172,10 +178,11 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
  * @brief Implementation of save_config().
  *
  * Steps: build a cJSON object -> pretty-print it to a heap string -> write
- * the string to the file. Both the fputs and the fclose results are checked,
- * because fclose can report write errors that were buffered.
- *
- * TODO(security): not atomic and uses default file permissions.
+ * it to a temporary file in the same folder -> fsync -> rename() over the
+ * destination. mkstemp creates the temporary file exclusively with mode
+ * 0600, and rename() keeps that mode, so the saved config is always
+ * owner-only and is replaced atomically. If anything fails the temporary
+ * file is removed and the old config is left untouched.
  */
 ConfigStatus save_config(const char *file_path, const SfmConfig *cfg) {
     if (file_path == nullptr || cfg == nullptr) return CONFIG_ERR_ARGS;
@@ -196,14 +203,39 @@ ConfigStatus save_config(const char *file_path, const SfmConfig *cfg) {
     cJSON_Delete(json);
     if (text == nullptr) return CONFIG_ERR_IO;
 
-    // TODO(security): write to a temp file + rename() for atomic replace,
-    //                 and create the file with 0600 permissions.
-    FILE *f = fopen(file_path, "wb");
-    if (f == nullptr) { free(text); return CONFIG_ERR_IO; }
+    // Temporary file in the SAME folder as the destination (a rename across
+    // file systems would not be atomic). Short random name.
+    const char *slash = strrchr(file_path, '/');
+    const int dir_len = (slash != nullptr) ? (int)(slash - file_path + 1) : 0;
+    char tmp_path[4096 + 32];
+    const int n = snprintf(tmp_path, sizeof tmp_path, "%.*s.sfm-tmp-XXXXXX", dir_len, file_path);
+    if (n < 0 || (size_t)n >= sizeof tmp_path) { free(text); return CONFIG_ERR_IO; }
 
-    const bool wrote = fputs(text, f) >= 0;
-    const bool closed = fclose(f) == 0;  // fclose can report deferred write errors
+    const int fd = mkstemp(tmp_path);
+    if (fd < 0) { free(text); return CONFIG_ERR_IO; }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+    const size_t len = strlen(text);
+    bool ok = true;
+    size_t done = 0;
+    while (done < len) {
+        const ssize_t w = write(fd, text + done, len - done);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+        done += (size_t)w;
+    }
     free(text);
 
-    return (wrote && closed) ? CONFIG_OK : CONFIG_ERR_IO;
+    if (ok && fsync(fd) != 0) ok = false;   // make sure the data reached the disk
+    if (close(fd) != 0) ok = false;         // close can report deferred write errors
+    if (ok && rename(tmp_path, file_path) != 0) ok = false;  // atomic replace
+
+    if (!ok) {
+        (void)unlink(tmp_path);  // no half-written file left behind
+        return CONFIG_ERR_IO;
+    }
+    return CONFIG_OK;
 }

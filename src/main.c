@@ -6,38 +6,33 @@
 #include "cli/cli.h"
 #include "commands/commands.h"
 #include "config/config.h"
-
-// Where the config file lives. Optionally override it at build time:
-//   CMake: target_compile_definitions(sfm PRIVATE DEFAULT_CONFIG_PATH="/some/path/config.json")
-//   shell: gcc -DDEFAULT_CONFIG_PATH='"/some/path/config.json"' ...
-// (the quoting differs: the shell strips the outer single quotes, CMake does not need them)
-#ifndef DEFAULT_CONFIG_PATH
-#define DEFAULT_CONFIG_PATH "sfm_config.json"  // TODO: move to ~/.config/sfm/config.json
-#endif
+#include "init/init.h"
 
 /**
- * @brief Loads the config file, or starts from defaults if it does not exist.
+ * @brief Creates the folders and files sfm needs on the first run, then
+ *        loads the configuration.
  *
- * A missing file is normal on the first run. A file that exists but cannot
- * be read or parsed is an error: continuing with defaults could lead to
- * overwriting a valid configuration.
+ * The configuration file is created by init_setup() if it does not exist, so
+ * a failure to load it here is a real error (corrupt or unreadable file).
+ * Continuing with defaults would risk overwriting a valid configuration.
  *
  * @param cfg Output configuration.
  * @return true if @p cfg is ready to use, false (after printing why) if not.
  */
-static bool load_or_create_config(SfmConfig *cfg) {
-    const ConfigStatus cs = load_config(DEFAULT_CONFIG_PATH, cfg);
-
-    if (cs == CONFIG_OK) return true;
-
-    if (cs == CONFIG_ERR_NOT_FOUND) {
-        if (config_set_defaults(cfg, DEFAULT_CONFIG_PATH) == CONFIG_OK) return true;
-        (void)fprintf(stderr, "Cannot create default configuration.\n");
+static bool prepare_config(SfmConfig *cfg) {
+    SfmPaths paths;
+    const InitStatus is = init_setup(&paths);
+    if (is != INIT_OK) {
+        (void)fprintf(stderr, "Initialization failed: %s\n", init_strerror(is));
         return false;
     }
 
-    (void)fprintf(stderr, "Cannot load config '%s' (error %d)\n", DEFAULT_CONFIG_PATH, (int)cs);
-    return false;
+    const ConfigStatus cs = load_config(paths.config_file, cfg);
+    if (cs != CONFIG_OK) {
+        (void)fprintf(stderr, "Cannot load config '%s' (error %d)\n", paths.config_file, (int)cs);
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -67,7 +62,7 @@ int main(int argc, char *argv[]) {
     printf("Starting %s...\n", program_name);
 
     SfmConfig cfg;
-    if (!load_or_create_config(&cfg)) return EXIT_FAILURE;
+    if (!prepare_config(&cfg)) return EXIT_FAILURE;
 
     unsigned char key[AUTH_KEY_BYTES] = {};
     int exit_code = EXIT_FAILURE;

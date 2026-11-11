@@ -45,7 +45,7 @@ set(SFM_SOURCES
     src/fileio/fileio.c
     src/filecrypt/filecrypt.c
     src/validate/validate.c
-    # src/init/init.c   # uncomment once it exists
+    src/init/init.c
 )
 
 add_executable(sfm ${SFM_SOURCES}
@@ -54,7 +54,8 @@ add_executable(sfm ${SFM_SOURCES}
     src/validate/validate.h
     src/fileio/fileio.h
     src/cipher/cipher.h
-    src/filecrypt/filecrypt.h)
+    src/filecrypt/filecrypt.h
+    src/init/init.h)
 target_link_libraries(sfm PRIVATE 
     PkgConfig::SODIUM
     PkgConfig::CJSON    
@@ -76,7 +77,7 @@ set_target_properties(sfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Strict ISO mode (extensions OFF) hides POSIX declarations such as getopt,
 # optind, opterr, optopt, getline() or fileno(). Request them explicitly.
 # This also reaches clangd through compile_commands.json.
-target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L DEFAULT_CONFIG_PATH="${CMAKE_SOURCE_DIR}/config.json")
+target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L)
 
 # ---------------------------------------------------------------------------
 # Warnings

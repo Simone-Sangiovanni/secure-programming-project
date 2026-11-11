@@ -48,28 +48,36 @@ typedef enum {
 /**
  * @brief Writes the configuration to disk as JSON.
  *
- * Overwrites @p file_path if it already exists.
+ * The file is written to a temporary file in the same folder (mode 0600),
+ * flushed to disk, and then atomically renamed over @p file_path. Readers
+ * therefore see either the old complete file or the new complete file, never
+ * a half-written one, and the result is always readable by the owner only
+ * (0600), even if @p file_path already existed with other permissions.
  *
  * @param file_path Destination path.
  * @param cfg       Configuration to write. Must not be NULL.
  * @return CONFIG_OK on success, CONFIG_ERR_IO if the file could not be fully
- *         written, CONFIG_ERR_ARGS if a pointer is NULL.
+ *         written (the old file is left untouched), CONFIG_ERR_ARGS if a
+ *         pointer is NULL.
  */
 [[nodiscard]] ConfigStatus save_config(const char *file_path, const SfmConfig *cfg);
 
 /**
  * @brief Fills @p cfg with default values and no master password.
  *
- * Intended for the case where no config file exists yet. The resulting
- * struct has an empty salt and verifier, so config_is_first_run() returns
- * true for it.
+ * Used when the configuration file is created for the first time. The
+ * resulting struct has an empty salt and verifier, so config_is_first_run()
+ * returns true for it.
  *
  * @param cfg         Struct to initialise. Must not be NULL.
- * @param config_path Path the config will be saved to. Must not be NULL.
- * @return CONFIG_OK on success, CONFIG_ERR_INVALID if @p config_path does not
- *         fit in the struct, CONFIG_ERR_ARGS if a pointer is NULL.
+ * @param config_path Path the config will be saved to.
+ * @param vault_path  Path of the vault folder.
+ * @param log_path    Path of the log file.
+ * @return CONFIG_OK on success, CONFIG_ERR_INVALID if a path does not fit in
+ *         the struct, CONFIG_ERR_ARGS if a pointer is NULL.
  */
-[[nodiscard]] ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path);
+[[nodiscard]] ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
+                                               const char *vault_path, const char *log_path);
 
 /**
  * @brief Tells whether the program has no master password set up yet.
