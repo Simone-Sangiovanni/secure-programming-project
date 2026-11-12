@@ -45,6 +45,7 @@ static bool prepare_config(SfmConfig *cfg) {
 static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]) {
     if (config_is_first_run(cfg)) {
         printf("No master password set. Let's create one.\n");
+        printf("Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character.\n");
         return auth_setup_master_password(cfg, key);  // also saves the config file
     }
     return auth_login(cfg, key);

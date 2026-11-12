@@ -16,6 +16,7 @@
   
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <assert.h>
 
 #include "auth.h"
@@ -223,6 +224,36 @@ static AuthStatus create_credentials(const char *password, SfmConfig *cfg, unsig
 }
 
 
+
+/**
+ * @brief Checks if a password meets the complexity requirements.
+ *
+ * Requirements:
+ * - Length between 8 and 64 characters.
+ * - At least one uppercase letter.
+ * - At least one lowercase letter.
+ * - At least one digit.
+ * - At least one special character.
+ */
+static bool is_password_complex(const char *password) {
+    size_t len = strlen(password);
+    if (len < 8 || len > 64) return false;
+
+    bool has_upper = false;
+    bool has_lower = false;
+    bool has_digit = false;
+    bool has_special = false;
+
+    for (size_t i = 0; i < len; i++) {
+        if (isupper((unsigned char)password[i])) has_upper = true;
+        else if (islower((unsigned char)password[i])) has_lower = true;
+        else if (isdigit((unsigned char)password[i])) has_digit = true;
+        else has_special = true;
+    }
+
+    return has_upper && has_lower && has_digit && has_special;
+}
+
 /* -------------------------------- */
 /* ---------- public API ---------- */
 /* -------------------------------- */
@@ -231,11 +262,11 @@ static AuthStatus create_credentials(const char *password, SfmConfig *cfg, unsig
 /**
  * @brief Implementation of auth_setup_master_password().
  *
- * Flow: prompt -> confirm -> compare -> create credentials in a working
+ * Flow: prompt -> check complexity -> confirm -> compare -> create credentials in a working
  * copy of the config -> save that copy to disk -> commit it to @p cfg.
  * Password buffers and keys are wiped on every path.
  */
-AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char *key_out) {
+AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH_KEY_BYTES]) {
     // Validate input parameters. Ensure pointers aren't null and the file path isn't empty.
     if (cfg == nullptr || key_out == nullptr || cfg->config_path[0] == '\0') {
         return AUTH_ERR_ARGS;
@@ -247,17 +278,25 @@ AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char *key_out) {
     char confirm[AUTH_PASSWORD_MAX];
     unsigned char key[AUTH_KEY_BYTES];
 
+    // 1. Read the initial password choice
     AuthStatus status = read_password("Choose a master password: ", password, sizeof password);
-    if (status == AUTH_OK) {
-        status = read_password("Confirm master password: ", confirm, sizeof confirm);
+
+    // 2. Validate strength and length immediately on the first entry
+    if (status == AUTH_OK && password[0] == '\0') {
+        status = AUTH_ERR_EMPTY;
+    } else if (status == AUTH_OK && !is_password_complex(password)) {
+        status = AUTH_ERR_WEAK;
     }
 
-    // TODO(security): enforce a minimum length / strength policy.
-    if (status == AUTH_OK && password[0] == '\0') status = AUTH_ERR_EMPTY;
-    if (status == AUTH_OK && strcmp(password, confirm) != 0) status = AUTH_ERR_MISMATCH;
+    // 3. Only ask for confirmation if the first entry passed the complexity checks
+    if (status == AUTH_OK) {
+        status = read_password("Confirm master password: ", confirm, sizeof confirm);
+        if (status == AUTH_OK && strcmp(password, confirm) != 0) {
+            status = AUTH_ERR_MISMATCH;
+        }
+    }
 
-    // create a copy of the configuration to avoid modifying original data prematurely,
-    // create credentials and then update the original data in case of success
+    // 4. Create credentials and update original data on success
     if (status == AUTH_OK) {
         printf("Generating keys (this takes a moment)...\n");
         SfmConfig updated = *cfg;
@@ -274,10 +313,11 @@ AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char *key_out) {
         }
     }
 
-    // wipe sensitive data
+    // Security: wipe sensitive data from memory regardless of success or early failure
     sodium_memzero(password, sizeof password);
     sodium_memzero(confirm, sizeof confirm);
     sodium_memzero(key, sizeof key);
+    
     return status;
 }
 
@@ -357,6 +397,7 @@ const char *auth_strerror(AuthStatus status) {
         case AUTH_ERR_IO: return "Cannot read the password (is stdin a terminal?)";
         case AUTH_ERR_TOO_LONG: return "Password too long";
         case AUTH_ERR_EMPTY: return "Password cannot be empty";
+        case AUTH_ERR_WEAK: return "Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character";
         case AUTH_ERR_MISMATCH: return "Passwords do not match";
         case AUTH_ERR_CRYPTO: return "Cryptographic error";
         case AUTH_ERR_CONFIG: return "Configuration is missing or corrupt";

@@ -21,7 +21,7 @@
  */
 
 // max password lenght
-#define AUTH_PASSWORD_MAX 128
+#define AUTH_PASSWORD_MAX 65
 
 // size in bytes of the file-encryption key returned by setup / login
 #define AUTH_KEY_BYTES 32
@@ -36,6 +36,7 @@ typedef enum {
     AUTH_ERR_IO,           /**< Terminal could not be read or configured. */
     AUTH_ERR_TOO_LONG,     /**< Password longer than AUTH_PASSWORD_MAX - 1. */
     AUTH_ERR_EMPTY,        /**< User entered an empty password. */
+    AUTH_ERR_WEAK,         /**< Password does not meet complexity requirements. */
     AUTH_ERR_MISMATCH,     /**< The two entries did not match. */
     AUTH_ERR_CRYPTO,       /**< libsodium failure (init, out of memory, ...). */
     AUTH_ERR_CONFIG,       /**< Salt/verifier in the config are missing or corrupt. */
