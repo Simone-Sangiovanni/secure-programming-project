@@ -85,7 +85,7 @@ typedef struct {
 static const CliCommand command_table[] = {
     {"list", cmd_list, 0, 0, "list", "List the encrypted files in the vault"},
     {"encrypt", cmd_encrypt, 1, 1, "encrypt <absolute_path>", "Encrypt a file"},
-    {"decrypt", cmd_decrypt, 1, 1, "decrypt <absolute_path>", "Decrypt a file"},
+    {"decrypt", cmd_decrypt, 2, 2, "decrypt <file_in_vault> <absolute_destination_directory>", "Decrypt a file from the vault to a directory"},
     {"secure_delete", cmd_secure_delete, 1, 1, "secure_delete <file_name>", "Securely delete a file from the vault"},
 };
 
