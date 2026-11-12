@@ -1,0 +1,1 @@
+rm -r ~/.config/sfm ~/.local/share/sfm ~/.local/state/sfm
