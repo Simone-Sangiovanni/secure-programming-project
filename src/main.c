@@ -1,12 +1,59 @@
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
 #include <sodium.h>
-
 #include "auth/auth.h"
 #include "cli/cli.h"
 #include "commands/commands.h"
 #include "config/config.h"
 #include "init/init.h"
+
+#define VAULT_FILE_EXT ".sfm"
+#define VAULT_FILE_EXT_LEN (sizeof VAULT_FILE_EXT - 1)
+
+/**
+ * @brief Disables core dumps so secrets in RAM are not written to disk on crash.
+ */
+static void disable_core_dumps(void) {
+    const struct rlimit zero = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &zero);
+}
+
+/**
+ * @brief Checks whether the vault directory already contains any ".sfm" files.
+ *
+ * Used during first-run detection: if the config file was deleted or blanked
+ * while encrypted files already exist in the vault, creating a new master
+ * password would generate a new salt and make existing files unrecoverable.
+ *
+ * @param vault_path Path to the vault directory.
+ * @return true if at least one ".sfm" file is present, false otherwise.
+ */
+static bool vault_has_encrypted_files(const char *vault_path) {
+    if (vault_path == nullptr || vault_path[0] == '\0') return false;
+
+    DIR *dir = opendir(vault_path);
+    if (dir == nullptr) return false;
+
+    bool found = false;
+    const struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        const size_t len = strlen(entry->d_name);
+        if (len > VAULT_FILE_EXT_LEN &&
+            strcmp(entry->d_name + len - VAULT_FILE_EXT_LEN, VAULT_FILE_EXT) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    (void)closedir(dir);
+    return found;
+}
 
 /**
  * @brief Creates the folders and files sfm needs on the first run, then
@@ -44,6 +91,13 @@ static bool prepare_config(SfmConfig *cfg) {
  */
 static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]) {
     if (config_is_first_run(cfg)) {
+        if (vault_has_encrypted_files(cfg->vault_path)) {
+            (void)fprintf(stderr,
+                          "Refusing first-run setup: encrypted files already exist in '%s'.\n"
+                          "Restore your original configuration file to access the existing vault.\n",
+                          cfg->vault_path);
+            return AUTH_ERR_CONFIG;
+        }
         printf("No master password set. Let's create one.\n");
         printf("Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character.\n");
         return auth_setup_master_password(cfg, key);  // also saves the config file
@@ -52,12 +106,20 @@ static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]
 }
 
 int main(int argc, char *argv[]) {
-    const CliStatus status = cli_parse(argc, argv);
+    disable_core_dumps();
 
+    const CliStatus status = cli_parse(argc, argv);
     switch (status) {
         case CLI_EXIT_SUCCESS: return EXIT_SUCCESS;
         case CLI_ERROR:        return EXIT_FAILURE;
         case CLI_OK:           break;  // proceed to run sfm
+    }
+
+    // Ignore Ctrl-C, Ctrl-\, and Ctrl-Z before password entry so an interrupt
+    // cannot leave the terminal with ECHO disabled.
+    if (!cli_ignore_signals()) {
+        (void)fprintf(stderr, "Cannot protect the process from terminal signals.\n");
+        return EXIT_FAILURE;
     }
 
     printf("Starting %s...\n", program_name);
