@@ -5,11 +5,12 @@
 
 /**
  * @file commands.h
- * @brief The code that EXECUTES the shell commands (list, encrypt, ...).
+ * @brief Executes the interactive shell commands (list, encrypt, decrypt,
+ *        secure_delete).
  *
- * The cli module only parses what the user typed and calls one of these
- * functions. Everything a command needs comes through CommandContext, so
- * there is no global state.
+ * The cli module parses what the user typed and calls one of these functions.
+ * Everything a command needs comes through CommandContext, so there is no
+ * global state.
  */
 
 /** Everything a command needs to do its job. */
@@ -28,32 +29,32 @@ typedef enum {
 /**
  * Signature shared by all commands. @p argc / @p argv are the arguments
  * AFTER the command name, and their count has already been checked by the
- * cli module (e.g. encrypt always receives exactly one argument).
+ * cli module.
  */
 typedef CommandStatus (*CommandHandler)(const CommandContext *ctx, int argc, char *argv[]);
 
-/** list: lists the encrypted files in the vault. Takes no arguments. (not implemented yet) */
+/** list: lists the encrypted files (.sfm) in the vault. Takes no arguments. */
 [[nodiscard]] CommandStatus cmd_list(const CommandContext *ctx, int argc, char *argv[]);
 
 /**
- * encrypt <absolute_path>: encrypts ONE file.
+ * encrypt <absolute_path>: encrypts ONE file into the vault.
  *
- * Reads the file, encrypts it with ctx->key and writes "<path>.sfm" next to
- * it. The original file is left untouched, and an existing "<path>.sfm" is
+ * Reads the file, encrypts it with ctx->key into "<vault>/<basename>.sfm",
+ * and securely deletes the original source file. An existing vault file is
  * never overwritten.
  */
 [[nodiscard]] CommandStatus cmd_encrypt(const CommandContext *ctx, int argc, char *argv[]);
 
 /**
- * decrypt <absolute_path>: decrypts ONE file whose name ends in ".sfm".
+ * decrypt <file_in_vault> <absolute_destination_directory>: decrypts ONE file
+ * from the vault into @p argv[1] without the ".sfm" suffix.
  *
- * Writes the plaintext to the same path without the ".sfm" suffix. Nothing is
- * written if the key is wrong or the file was modified, and an existing
- * output file is never overwritten.
+ * The encrypted copy remains in the vault, and an existing output file is
+ * never overwritten.
  */
 [[nodiscard]] CommandStatus cmd_decrypt(const CommandContext *ctx, int argc, char *argv[]);
 
-/** secure_delete <file_name>: securely deletes a file from the vault. (not implemented yet) */
+/** secure_delete <file_name>: securely deletes an encrypted file from the vault. */
 [[nodiscard]] CommandStatus cmd_secure_delete(const CommandContext *ctx, int argc, char *argv[]);
 
 /** Returns a human-readable message for a CommandStatus (never NULL). */
