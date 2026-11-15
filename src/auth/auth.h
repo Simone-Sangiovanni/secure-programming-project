@@ -20,28 +20,25 @@
  * stored.
  */
 
-// max password lenght
-#define AUTH_PASSWORD_MAX 65
+// Max password buffer length: 64 password bytes + '\n' + '\0'
+#define AUTH_PASSWORD_MAX 66
 
-// size in bytes of the file-encryption key returned by setup / login
+// Size in bytes of the file-encryption key returned by setup / login
 #define AUTH_KEY_BYTES 32
 
-// Number of password attempts allowed by auth_login()
-#define AUTH_MAX_ATTEMPTS 5
-
-// result codes returned by the auth functions
+// Result codes returned by the auth functions
 typedef enum {
     AUTH_OK = 0,           /**< Success. */
     AUTH_ERR_ARGS,         /**< NULL pointer or unusable argument (a bug). */
-    AUTH_ERR_IO,           /**< Terminal could not be read or configured. */
-    AUTH_ERR_TOO_LONG,     /**< Password longer than AUTH_PASSWORD_MAX - 1. */
+    AUTH_ERR_IO,           /**< Terminal could not be read or configured (or EOF). */
+    AUTH_ERR_TOO_LONG,     /**< Password longer than 64 bytes. */
     AUTH_ERR_EMPTY,        /**< User entered an empty password. */
     AUTH_ERR_WEAK,         /**< Password does not meet complexity requirements. */
     AUTH_ERR_MISMATCH,     /**< The two entries did not match. */
     AUTH_ERR_CRYPTO,       /**< libsodium failure (init, out of memory, ...). */
-    AUTH_ERR_CONFIG,       /**< Salt/verifier in the config are missing or corrupt. */
+    AUTH_ERR_CONFIG,       /**< Salt/verifier/KDF in the config are missing or corrupt. */
     AUTH_ERR_SAVE,         /**< The config file could not be written. */
-    AUTH_ERR_WRONG_PASSWORD/**< All login attempts failed. */
+    AUTH_ERR_WRONG_PASSWORD/**< Password verification failed. */
 } AuthStatus;
 
 /**
@@ -64,13 +61,13 @@ typedef enum {
  * @brief Logs in: asks for the master password and checks it against the
  *        verifier stored in the config.
  *
- * Allows up to AUTH_MAX_ATTEMPTS tries. The comparison is constant-time.
+ * Uses constant-time comparison and capped exponential backoff (1s..30s)
+ * on wrong attempts to slow down brute-force attacks without permanent lockout.
  *
  * @param cfg     Loaded configuration containing salt and verifier.
  * @param key_out Receives the AUTH_KEY_BYTES-byte file-encryption key on
  *                success. The caller must wipe it with sodium_memzero().
- * @return AUTH_OK on success, AUTH_ERR_WRONG_PASSWORD after too many wrong
- *         attempts, or another code for other failures.
+ * @return AUTH_OK on success, or an error code if input/config/crypto fails.
  */
 [[nodiscard]] AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out);
 
