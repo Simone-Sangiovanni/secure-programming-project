@@ -34,7 +34,6 @@ pkg_check_modules(CJSON  REQUIRED IMPORTED_TARGET libcjson)
 # ---------------------------------------------------------------------------
 # Target
 # ---------------------------------------------------------------------------
-# Add every new source file here
 set(SFM_SOURCES
     src/main.c
     src/cli/cli.c
@@ -49,16 +48,20 @@ set(SFM_SOURCES
 )
 
 add_executable(sfm ${SFM_SOURCES}
+    src/cli/cli.h
+    src/commands/commands.h
     src/config/config.h
     src/auth/auth.h
     src/validate/validate.h
     src/fileio/fileio.h
     src/cipher/cipher.h
     src/filecrypt/filecrypt.h
-    src/init/init.h)
-target_link_libraries(sfm PRIVATE 
+    src/init/init.h
+)
+
+target_link_libraries(sfm PRIVATE
     PkgConfig::SODIUM
-    PkgConfig::CJSON    
+    PkgConfig::CJSON
 )
 
 # Lets sources use #include "cli.h" / "init.h" regardless of subdirectory
@@ -75,9 +78,13 @@ check_pie_supported(LANGUAGES C)
 set_target_properties(sfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Strict ISO mode (extensions OFF) hides POSIX declarations such as getopt,
-# optind, opterr, optopt, getline() or fileno(). Request them explicitly.
-# This also reaches clangd through compile_commands.json.
-target_compile_definitions(sfm PRIVATE _POSIX_C_SOURCE=200809L)
+# optind, opterr, optopt, realpath, or fileno(). Request them explicitly
+# alongside 64-bit file offsets.
+target_compile_definitions(sfm PRIVATE
+    _POSIX_C_SOURCE=200809L
+    _XOPEN_SOURCE=700
+    _FILE_OFFSET_BITS=64
+)
 
 # ---------------------------------------------------------------------------
 # Warnings
