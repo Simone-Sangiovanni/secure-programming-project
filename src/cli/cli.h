@@ -1,12 +1,12 @@
-#ifndef CLI_H 
+#ifndef CLI_H
 #define CLI_H
 
 #include "../commands/commands.h"
 
 constexpr char program_version[] = "1.0.0";
-constexpr char program_name[] ="sfm (Secure File Manager)";
+constexpr char program_name[] = "sfm (Secure File Manager)";
 
-// status returned by the CLI parser
+// Status returned by the CLI parser
 typedef enum : unsigned char {
     CLI_OK = 0,         // Arguments parsed successfully, proceed with program execution
     CLI_EXIT_SUCCESS,   // Processed a flag like -h or -v; exit program normally
@@ -15,14 +15,21 @@ typedef enum : unsigned char {
 
 /**
  * Parses command-line arguments for sfm.
- *
  * Mark function return as [[nodiscard]] so callers cannot ignore the status.
  *
  * @param argc  Argument count from main()
  * @param argv  Argument vector from main()
- * @return CliStatus indicating execution outcome 
+ * @return CliStatus indicating execution outcome
  */
 [[nodiscard]] CliStatus cli_parse(int argc, char *argv[]);
+
+/**
+ * Ignores keyboard signals (SIGINT, SIGQUIT, SIGTSTP) so the process cannot
+ * be suspended with secrets in RAM or terminated while terminal ECHO is off.
+ *
+ * @return true on success, false if a signal handler could not be installed.
+ */
+[[nodiscard]] bool cli_ignore_signals(void);
 
 /**
  * Runs the interactive shell ("sfm> " prompt).
