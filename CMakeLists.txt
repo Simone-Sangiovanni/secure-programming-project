@@ -45,6 +45,7 @@ set(SFM_SOURCES
     src/filecrypt/filecrypt.c
     src/validate/validate.c
     src/init/init.c
+    src/log/log.c
 )
 
 add_executable(sfm ${SFM_SOURCES}
@@ -57,6 +58,7 @@ add_executable(sfm ${SFM_SOURCES}
     src/cipher/cipher.h
     src/filecrypt/filecrypt.h
     src/init/init.h
+    src/log/log.h
 )
 
 target_link_libraries(sfm PRIVATE

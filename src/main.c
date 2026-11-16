@@ -4,11 +4,13 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sodium.h>
+
 #include "auth/auth.h"
 #include "cli/cli.h"
 #include "commands/commands.h"
 #include "config/config.h"
 #include "init/init.h"
+#include "log/log.h"
 
 #define VAULT_FILE_EXT ".sfm"
 #define VAULT_FILE_EXT_LEN (sizeof VAULT_FILE_EXT - 1)
@@ -33,7 +35,6 @@ static void disable_core_dumps(void) {
  */
 static bool vault_has_encrypted_files(const char *vault_path) {
     if (vault_path == nullptr || vault_path[0] == '\0') return false;
-
     DIR *dir = opendir(vault_path);
     if (dir == nullptr) return false;
 
@@ -50,7 +51,6 @@ static bool vault_has_encrypted_files(const char *vault_path) {
             break;
         }
     }
-
     (void)closedir(dir);
     return found;
 }
@@ -73,10 +73,9 @@ static bool prepare_config(SfmConfig *cfg) {
         (void)fprintf(stderr, "Initialization failed: %s\n", init_strerror(is));
         return false;
     }
-
     const ConfigStatus cs = load_config(paths.config_file, cfg);
     if (cs != CONFIG_OK) {
-        (void)fprintf(stderr, "Cannot load config '%s' (error %d)\n", paths.config_file, (int)cs);
+        (void)fprintf(stderr, "Initialization failed: configuration file is missing or invalid.\n");
         return false;
     }
     return true;
@@ -93,16 +92,27 @@ static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]
     if (config_is_first_run(cfg)) {
         if (vault_has_encrypted_files(cfg->vault_path)) {
             (void)fprintf(stderr,
-                          "Refusing first-run setup: encrypted files already exist in '%s'.\n"
-                          "Restore your original configuration file to access the existing vault.\n",
-                          cfg->vault_path);
+                          "Refusing first-run setup: encrypted files already exist in the vault.\n"
+                          "Restore your original configuration file to access the existing vault.\n");
+            log_audit_event(cfg, LOG_EVENT_MASTER_SETUP, LOG_OUTCOME_FAILURE, nullptr);
             return AUTH_ERR_CONFIG;
         }
         printf("No master password set. Let's create one.\n");
         printf("Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character.\n");
-        return auth_setup_master_password(cfg, key);  // also saves the config file
+        const AuthStatus setup_status = auth_setup_master_password(cfg, key);  // also saves the config file
+        log_audit_event(cfg,
+                        LOG_EVENT_MASTER_SETUP,
+                        (setup_status == AUTH_OK) ? LOG_OUTCOME_SUCCESS : LOG_OUTCOME_FAILURE,
+                        nullptr);
+        return setup_status;
     }
-    return auth_login(cfg, key);
+
+    const AuthStatus login_status = auth_login(cfg, key);
+    log_audit_event(cfg,
+                    LOG_EVENT_LOGIN,
+                    (login_status == AUTH_OK) ? LOG_OUTCOME_SUCCESS : LOG_OUTCOME_FAILURE,
+                    nullptr);
+    return login_status;
 }
 
 int main(int argc, char *argv[]) {
