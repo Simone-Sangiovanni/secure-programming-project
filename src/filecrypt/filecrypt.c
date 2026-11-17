@@ -8,10 +8,10 @@ bool filecrypt_ok(FileCryptResult result) {
     return result.io == FILEIO_OK && result.cipher == CIPHER_OK;
 }
 
-FileCryptResult filecrypt_encrypt(const unsigned char key[CIPHER_KEY_BYTES],
+FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                   const char *in_path, const char *out_path) {
     FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
-    if (key == nullptr || in_path == nullptr || out_path == nullptr) {
+    if (kek == nullptr || in_path == nullptr || out_path == nullptr) {
         res.cipher = CIPHER_ERR_ARGS;
         return res;
     }
@@ -38,7 +38,7 @@ FileCryptResult filecrypt_encrypt(const unsigned char key[CIPHER_KEY_BYTES],
     enc = malloc(ENC_CHUNK_MAX);
     if (plain == nullptr || enc == nullptr) { res.io = FILEIO_ERR_ALLOC; goto cleanup; }
 
-    CipherStatus cs = cipher_encrypt_begin(key, &stream, header);
+    CipherStatus cs = cipher_encrypt_begin(kek, &stream, header);
     if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
 
     fs = fileio_writer_create(out_path, &out);
@@ -81,10 +81,10 @@ cleanup:
     return res;
 }
 
-FileCryptResult filecrypt_decrypt(const unsigned char key[CIPHER_KEY_BYTES],
+FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                   const char *in_path, const char *out_path) {
     FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
-    if (key == nullptr || in_path == nullptr || out_path == nullptr) {
+    if (kek == nullptr || in_path == nullptr || out_path == nullptr) {
         res.cipher = CIPHER_ERR_ARGS;
         return res;
     }
@@ -106,7 +106,7 @@ FileCryptResult filecrypt_decrypt(const unsigned char key[CIPHER_KEY_BYTES],
     if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
     if (got != sizeof header) { res.cipher = CIPHER_ERR_FORMAT; goto cleanup; }
 
-    CipherStatus cs = cipher_decrypt_begin(key, header, &stream);
+    CipherStatus cs = cipher_decrypt_begin(kek, header, &stream);
     if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
 
     plain = malloc(CIPHER_CHUNK_SIZE);

@@ -11,19 +11,19 @@
  *   - salt     = 16 random bytes
  *   - master   = Argon2id(password, salt)                  (32 bytes)
  *   - verifier = KDF(master, id 1, context "sfmverif")     (32 bytes)
- *   - file key = KDF(master, id 2, context "sfmfkey!")     (32 bytes)
+ *   - KEK      = KDF(master, id 2, context "sfmkek!!")     (32 bytes)
  *
  * The salt and the verifier (both Base64) are stored in the config file.
- * The verifier and the file key are derived from the master key with
- * different KDF contexts, so knowing the verifier (which sits on disk) does
- * not reveal the key used to encrypt files. The password itself is never
- * stored.
+ * The verifier and the Key-Encryption Key (KEK) are derived from the master
+ * key with different KDF contexts, so knowing the verifier (which sits on
+ * disk) does not reveal the KEK used to wrap per-file Data-Encryption Keys
+ * (DEKs). The password itself is never stored.
  */
 
 // Max password buffer length: 64 password bytes + '\n' + '\0'
 #define AUTH_PASSWORD_MAX 66
 
-// Size in bytes of the file-encryption key returned by setup / login
+// Size in bytes of the Key-Encryption Key (KEK) returned by setup / login
 #define AUTH_KEY_BYTES 32
 
 // Result codes returned by the auth functions
@@ -51,8 +51,8 @@ typedef enum {
  * whole operation, including the save, succeeded.
  *
  * @param cfg     Configuration to update. Must have a non-empty config_path.
- * @param key_out Receives the AUTH_KEY_BYTES-byte file-encryption key. The
- *                caller must wipe it with sodium_memzero() when done.
+ * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK).
+ *                The caller must wipe it with sodium_memzero() when done.
  * @return AUTH_OK on success, otherwise the reason it failed.
  */
 [[nodiscard]] AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH_KEY_BYTES]);
@@ -65,7 +65,7 @@ typedef enum {
  * on wrong attempts to slow down brute-force attacks without permanent lockout.
  *
  * @param cfg     Loaded configuration containing salt and verifier.
- * @param key_out Receives the AUTH_KEY_BYTES-byte file-encryption key on
+ * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK) on
  *                success. The caller must wipe it with sodium_memzero().
  * @return AUTH_OK on success, or an error code if input/config/crypto fails.
  */

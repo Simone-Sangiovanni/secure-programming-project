@@ -7,7 +7,7 @@
 /**
  * @file cipher.h
  * @brief Authenticated, chunk-by-chunk encryption (libsodium secretstream,
- *        XChaCha20-Poly1305).
+ *        XChaCha20-Poly1305) with per-file Data-Encryption Keys (DEKs).
  *
  * A file is encrypted as a sequence of independent-size chunks so memory use
  * stays constant (about 2 chunks) whatever the file size. Every chunk is
@@ -15,14 +15,20 @@
  * duplication, removal and truncation: the last chunk carries a special
  * FINAL mark that a decryptor insists on seeing.
  *
- * Encrypted file layout (format version 2):
+ * Encrypted file layout (format version 3, 101-byte header):
  *
- *   | "SFM1" (4) | version=2 (1) | stream header (24) | chunk 1 | chunk 2 | ... | last chunk |
+ *   | "SFM1" (4) | version=3 (1) | wrap_nonce (24) | wrapped_dek (32 + 16) | stream_header (24) | chunk 1 | ... | last chunk |
  *
- * where every chunk is  ciphertext (up to 128 KiB) + 17-byte tag.
- * All chunks hold exactly CIPHER_CHUNK_SIZE bytes of plaintext except the
- * last one, which holds between 0 and CIPHER_CHUNK_SIZE (0 only for an
- * empty file). The first 5 bytes are authenticated too.
+ * where:
+ *   - Every file generates a fresh random 32-byte DEK.
+ *   - The DEK is wrapped (authenticated + encrypted) under the caller's KEK
+ *     using crypto_aead_xchacha20poly1305_ietf_encrypt() with the 5-byte
+ *     prefix ("SFM1" || version=3) bound as associated data.
+ *   - The secretstream is initialized with the unwrapped 32-byte DEK, and
+ *     the same 5-byte prefix is authenticated with every chunk.
+ *   - Every chunk is ciphertext (up to 128 KiB) + 17-byte tag. All chunks hold
+ *     exactly CIPHER_CHUNK_SIZE bytes of plaintext except the last one, which
+ *     holds between 0 and CIPHER_CHUNK_SIZE (0 only for an empty file).
  *
  * This module only transforms memory buffers; it never touches files.
  */
@@ -41,10 +47,10 @@
 /** Authentication tag added to every chunk. */
 #define CIPHER_TAG_BYTES 17U
 
-/** Size of the encrypted-file header (magic + version + stream header). */
-#define CIPHER_HEADER_BYTES 29U
+/** Size of the encrypted-file header (4 magic + 1 ver + 24 wrap_nonce + 48 wrapped_dek + 24 stream_header). */
+#define CIPHER_HEADER_BYTES 101U
 
-/** Size in bytes of the encryption key (same as AUTH_KEY_BYTES). */
+/** Size in bytes of the Key-Encryption Key (KEK) and per-file DEK (same as AUTH_KEY_BYTES). */
 #define CIPHER_KEY_BYTES 32
 
 /** Result codes returned by the cipher functions. */
@@ -64,14 +70,14 @@ typedef enum {
 typedef struct CipherStream CipherStream;
 
 /**
- * @brief Starts encrypting a new file.
+ * @brief Starts encrypting a new file with a fresh per-file DEK wrapped by @p kek.
  *
- * @param key    CIPHER_KEY_BYTES-byte key.
+ * @param kek    CIPHER_KEY_BYTES-byte Key-Encryption Key.
  * @param stream Receives the state. Release it with cipher_stream_free().
  * @param header Receives CIPHER_HEADER_BYTES bytes that must be written at
  *               the very beginning of the encrypted file.
  */
-[[nodiscard]] CipherStatus cipher_encrypt_begin(const unsigned char key[CIPHER_KEY_BYTES],
+[[nodiscard]] CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 CipherStream **stream,
                                                 unsigned char header[CIPHER_HEADER_BYTES]);
 
@@ -91,15 +97,15 @@ typedef struct CipherStream CipherStream;
                                                 unsigned char *out, size_t *out_len);
 
 /**
- * @brief Starts decrypting, from the header read at the start of the file.
+ * @brief Starts decrypting by unwrapping the per-file DEK with @p kek.
  *
- * @param key    CIPHER_KEY_BYTES-byte key.
+ * @param kek    CIPHER_KEY_BYTES-byte Key-Encryption Key.
  * @param header The first CIPHER_HEADER_BYTES bytes of the encrypted file.
  * @param stream Receives the state. Release it with cipher_stream_free().
- * @return CIPHER_OK, CIPHER_ERR_FORMAT or CIPHER_ERR_VERSION for files that
- *         are not valid sfm files.
+ * @return CIPHER_OK, CIPHER_ERR_FORMAT, CIPHER_ERR_VERSION, or CIPHER_ERR_AUTH
+ *         if the KEK is wrong or the wrapped DEK was tampered with.
  */
-[[nodiscard]] CipherStatus cipher_decrypt_begin(const unsigned char key[CIPHER_KEY_BYTES],
+[[nodiscard]] CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 const unsigned char header[CIPHER_HEADER_BYTES],
                                                 CipherStream **stream);
 

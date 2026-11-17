@@ -29,7 +29,7 @@ typedef struct {
  * would exceed FILEIO_MAX_SIZE. If anything fails, the output file is
  * removed. The input is never modified.
  */
-[[nodiscard]] FileCryptResult filecrypt_encrypt(const unsigned char key[CIPHER_KEY_BYTES],
+[[nodiscard]] FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 const char *in_path, const char *out_path);
 
 /**
@@ -40,7 +40,7 @@ typedef struct {
  * data), the output file is removed, so a failed decryption leaves nothing
  * behind. The input is never modified.
  */
-[[nodiscard]] FileCryptResult filecrypt_decrypt(const unsigned char key[CIPHER_KEY_BYTES],
+[[nodiscard]] FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 const char *in_path, const char *out_path);
 
 #endif

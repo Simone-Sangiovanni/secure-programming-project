@@ -46,7 +46,7 @@ cmake --build build
 ## Run
 Initialize the folders and files:
 ```bash
-chmod +x basic_setup.sh reset.sh
+chmod +x reset.sh
 ./basic_setup.sh
 ```
 

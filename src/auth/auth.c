@@ -18,10 +18,10 @@
  * Domain separation contexts for libsodium's key derivation functions (crypto_kdf).
  * Libsodium requires context strings to be exactly 8 characters long. They ensure that
  * even if keys are derived from the same master secret, a key used for verification (sfmverif)
- * cannot be misused as a key used for file encryption (sfmfkey!).
+ * cannot be misused as a key used for wrapping per-file DEKs (sfmkek!!).
  */
 #define CTX_VERIFIER "sfmverif"
-#define CTX_FILE_KEY "sfmfkey!"
+#define CTX_KEK      "sfmkek!!"
 
 /*
  * Argon2id cost parameters. These define how much CPU power (ops_limit) and RAM (mem_limit)
@@ -122,7 +122,7 @@ static int derive_keys(const char *password, const unsigned char salt[AUTH_SALT_
     }
     if (rc == 0) {
         rc = crypto_kdf_derive_from_key(key_out, AUTH_KEY_BYTES, 2,
-                                        CTX_FILE_KEY, master);
+                                        CTX_KEK, master);
     }
 
     sodium_memzero(master, sizeof master);
