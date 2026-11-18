@@ -1,5 +1,6 @@
 #include "filecrypt.h"
 
+#include <sodium.h>
 #include <stdlib.h>
 
 #define ENC_CHUNK_MAX (CIPHER_CHUNK_SIZE + CIPHER_TAG_BYTES)  // bytes of one encrypted chunk
@@ -34,7 +35,8 @@ FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
         goto cleanup;
     }
 
-    plain = malloc(CIPHER_CHUNK_SIZE);
+    // Keep plaintext chunk buffer in locked, guard-page-protected memory.
+    plain = sodium_malloc(CIPHER_CHUNK_SIZE);
     enc = malloc(ENC_CHUNK_MAX);
     if (plain == nullptr || enc == nullptr) { res.io = FILEIO_ERR_ALLOC; goto cleanup; }
 
@@ -75,7 +77,7 @@ FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
 cleanup:
     fileio_writer_abort(out);  // no-op if finished; otherwise removes the partial file
     cipher_stream_free(stream);
-    cipher_free(plain, CIPHER_CHUNK_SIZE);  // wipes: it held plaintext
+    sodium_free(plain);  // zeroes, unlocks, and frees the locked plaintext buffer
     cipher_free(enc, ENC_CHUNK_MAX);
     fileio_reader_close(in);
     return res;
@@ -109,7 +111,8 @@ FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
     CipherStatus cs = cipher_decrypt_begin(kek, header, &stream);
     if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
 
-    plain = malloc(CIPHER_CHUNK_SIZE);
+    // Keep plaintext chunk buffer in locked, guard-page-protected memory.
+    plain = sodium_malloc(CIPHER_CHUNK_SIZE);
     enc = malloc(ENC_CHUNK_MAX);
     if (plain == nullptr || enc == nullptr) { res.io = FILEIO_ERR_ALLOC; goto cleanup; }
 
@@ -151,7 +154,7 @@ FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
 cleanup:
     fileio_writer_abort(out);  // no-op if finished; otherwise removes the partial plaintext
     cipher_stream_free(stream);
-    cipher_free(plain, CIPHER_CHUNK_SIZE);
+    sodium_free(plain);  // zeroes, unlocks, and frees the locked plaintext buffer
     cipher_free(enc, ENC_CHUNK_MAX);
     fileio_reader_close(in);
     return res;

@@ -35,7 +35,7 @@ struct CipherStream {
 void cipher_stream_free(CipherStream *stream) {
     if (stream == nullptr) return;
     sodium_memzero(stream, sizeof *stream);  // the state contains key material
-    free(stream);
+    sodium_free(stream);
 }
 
 CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
@@ -44,15 +44,20 @@ CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     if (kek == nullptr || stream == nullptr || header == nullptr) return CIPHER_ERR_ARGS;
     if (sodium_init() < 0) return CIPHER_ERR_INIT;
 
-    CipherStream *s = malloc(sizeof *s);
+    // Allocate CipherStream in locked, guard-page-protected memory so stream key state cannot swap.
+    CipherStream *s = sodium_malloc(sizeof *s);
     if (s == nullptr) return CIPHER_ERR_ALLOC;
 
     memcpy(header, MAGIC, MAGIC_LEN);
     header[VERSION_OFFSET] = (unsigned char)FORMAT_VERSION;
     memcpy(s->ad, header, AD_LEN);
 
-    // 1. Generate a fresh 32-byte per-file DEK and a 24-byte wrap nonce.
+    // 1. Generate a fresh 32-byte per-file DEK (locked in RAM) and a 24-byte wrap nonce.
     unsigned char dek[CIPHER_KEY_BYTES];
+    if (sodium_mlock(dek, sizeof dek) != 0) {
+        cipher_stream_free(s);
+        return CIPHER_ERR_ALLOC;
+    }
     randombytes_buf(dek, sizeof dek);
     randombytes_buf(header + WRAP_NONCE_OFFSET, WRAP_NONCE_BYTES);
 
@@ -68,6 +73,7 @@ CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
 
     if (wrap_rc != 0 || wrapped_len != WRAPPED_DEK_BYTES) {
         sodium_memzero(dek, sizeof dek);
+        (void)sodium_munlock(dek, sizeof dek);
         cipher_stream_free(s);
         return CIPHER_ERR_ENCRYPT;
     }
@@ -76,6 +82,7 @@ CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     const int init_rc = crypto_secretstream_xchacha20poly1305_init_push(
         &s->state, header + STREAM_HEADER_OFFSET, dek);
     sodium_memzero(dek, sizeof dek);
+    (void)sodium_munlock(dek, sizeof dek);
 
     if (init_rc != 0) {
         cipher_stream_free(s);
@@ -114,12 +121,16 @@ CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     if (memcmp(header, MAGIC, MAGIC_LEN) != 0) return CIPHER_ERR_FORMAT;
     if (header[VERSION_OFFSET] != FORMAT_VERSION) return CIPHER_ERR_VERSION;
 
-    CipherStream *s = malloc(sizeof *s);
+    CipherStream *s = sodium_malloc(sizeof *s);
     if (s == nullptr) return CIPHER_ERR_ALLOC;
     memcpy(s->ad, header, AD_LEN);
 
-    // 1. Unwrap the per-file DEK using the KEK and verify its 16-byte Poly1305 tag.
+    // 1. Unwrap the per-file DEK using the KEK (locked in RAM) and verify its 16-byte Poly1305 tag.
     unsigned char dek[CIPHER_KEY_BYTES];
+    if (sodium_mlock(dek, sizeof dek) != 0) {
+        cipher_stream_free(s);
+        return CIPHER_ERR_ALLOC;
+    }
     unsigned long long dek_len = 0;
     const int unwrap_rc = crypto_aead_xchacha20poly1305_ietf_decrypt(
         dek, &dek_len,
@@ -131,6 +142,7 @@ CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
 
     if (unwrap_rc != 0 || dek_len != sizeof dek) {
         sodium_memzero(dek, sizeof dek);
+        (void)sodium_munlock(dek, sizeof dek);
         cipher_stream_free(s);
         return CIPHER_ERR_AUTH;
     }
@@ -139,6 +151,7 @@ CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     const int init_rc = crypto_secretstream_xchacha20poly1305_init_pull(
         &s->state, header + STREAM_HEADER_OFFSET, dek);
     sodium_memzero(dek, sizeof dek);
+    (void)sodium_munlock(dek, sizeof dek);
 
     if (init_rc != 0) {
         cipher_stream_free(s);

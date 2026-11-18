@@ -82,10 +82,14 @@ static bool prepare_config(SfmConfig *cfg) {
 }
 
 /**
- * @brief Creates the master password on the first run, logs in otherwise.
+ * @brief Creates the master password on the first run, then requires login.
+ *
+ * After first-run setup succeeds, the temporary setup KEK is wiped and the
+ * user is prompted to log in explicitly so the newly saved credentials are
+ * verified before entering the interactive shell.
  *
  * @param cfg Loaded configuration (updated and saved on first run).
- * @param key Receives the file-encryption key on success.
+ * @param key Receives the file-encryption key on success (caller must lock/wipe).
  * @return AUTH_OK on success, otherwise the reason it failed.
  */
 static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]) {
@@ -100,11 +104,16 @@ static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]
         printf("No master password set. Let's create one.\n");
         printf("Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character.\n");
         const AuthStatus setup_status = auth_setup_master_password(cfg, key);  // also saves the config file
+        // Wipe the temporary setup KEK before requiring explicit login verification.
+        sodium_memzero(key, AUTH_KEY_BYTES);
         log_audit_event(cfg,
                         LOG_EVENT_MASTER_SETUP,
                         (setup_status == AUTH_OK) ? LOG_OUTCOME_SUCCESS : LOG_OUTCOME_FAILURE,
                         nullptr);
-        return setup_status;
+        if (setup_status != AUTH_OK) {
+            return setup_status;
+        }
+        printf("Master password configured. Please log in to continue.\n");
     }
 
     const AuthStatus login_status = auth_login(cfg, key);
@@ -125,6 +134,11 @@ int main(int argc, char *argv[]) {
         case CLI_OK:           break;  // proceed to run sfm
     }
 
+    if (sodium_init() < 0) {
+        (void)fprintf(stderr, "Initialization failed: cannot initialize cryptographic library.\n");
+        return EXIT_FAILURE;
+    }
+
     // Ignore Ctrl-C, Ctrl-\, and Ctrl-Z before password entry so an interrupt
     // cannot leave the terminal with ECHO disabled.
     if (!cli_ignore_signals()) {
@@ -138,6 +152,11 @@ int main(int argc, char *argv[]) {
     if (!prepare_config(&cfg)) return EXIT_FAILURE;
 
     unsigned char key[AUTH_KEY_BYTES] = {};
+    if (sodium_mlock(key, sizeof key) != 0) {
+        (void)fprintf(stderr, "Initialization failed: cannot lock key memory.\n");
+        return EXIT_FAILURE;
+    }
+
     int exit_code = EXIT_FAILURE;
 
     const AuthStatus as = authenticate(&cfg, key);
@@ -152,5 +171,6 @@ int main(int argc, char *argv[]) {
     }
 
     sodium_memzero(key, sizeof key);  // wipe the key on every path
+    (void)sodium_munlock(key, sizeof key);
     return exit_code;
 }

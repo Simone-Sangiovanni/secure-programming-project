@@ -17,7 +17,8 @@
  * The verifier and the Key-Encryption Key (KEK) are derived from the master
  * key with different KDF contexts, so knowing the verifier (which sits on
  * disk) does not reveal the KEK used to wrap per-file Data-Encryption Keys
- * (DEKs). The password itself is never stored.
+ * (DEKs). Sensitive buffers are locked in RAM with sodium_mlock() and wiped
+ * with sodium_memzero() / sodium_munlock() immediately after use.
  */
 
 // Max password buffer length: 64 password bytes + '\n' + '\0'
@@ -35,7 +36,7 @@ typedef enum {
     AUTH_ERR_EMPTY,        /**< User entered an empty password. */
     AUTH_ERR_WEAK,         /**< Password does not meet complexity requirements. */
     AUTH_ERR_MISMATCH,     /**< The two entries did not match. */
-    AUTH_ERR_CRYPTO,       /**< libsodium failure (init, out of memory, ...). */
+    AUTH_ERR_CRYPTO,       /**< libsodium failure (init, mlock, out of memory, ...). */
     AUTH_ERR_CONFIG,       /**< Salt/verifier/KDF in the config are missing or corrupt. */
     AUTH_ERR_SAVE,         /**< The config file could not be written. */
     AUTH_ERR_WRONG_PASSWORD/**< Password verification failed. */
@@ -52,7 +53,8 @@ typedef enum {
  *
  * @param cfg     Configuration to update. Must have a non-empty config_path.
  * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK).
- *                The caller must wipe it with sodium_memzero() when done.
+ *                The caller should lock it with sodium_mlock() and wipe/unlock
+ *                it with sodium_memzero() + sodium_munlock() when done.
  * @return AUTH_OK on success, otherwise the reason it failed.
  */
 [[nodiscard]] AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH_KEY_BYTES]);
@@ -66,7 +68,8 @@ typedef enum {
  *
  * @param cfg     Loaded configuration containing salt and verifier.
  * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK) on
- *                success. The caller must wipe it with sodium_memzero().
+ *                success. The caller should lock it with sodium_mlock() and
+ *                wipe/unlock it with sodium_memzero() + sodium_munlock().
  * @return AUTH_OK on success, or an error code if input/config/crypto fails.
  */
 [[nodiscard]] AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out);

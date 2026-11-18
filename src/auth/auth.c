@@ -55,6 +55,14 @@ static bool init_sodium(void) {
 }
 
 /**
+ * @brief Zeroes and unlocks a locked memory buffer.
+ */
+static void wipe_and_unlock(void *buf, size_t size) {
+    sodium_memzero(buf, size);
+    (void)sodium_munlock(buf, size);
+}
+
+/**
  * @brief Reads one line from the terminal without echoing it.
  *
  * Disables ECHO on stdin, prints @p prompt on stderr, reads a line, strips
@@ -112,6 +120,9 @@ static int derive_keys(const char *password, const unsigned char salt[AUTH_SALT_
                        unsigned char verifier_out[AUTH_VERIFIER_BYTES],
                        unsigned char key_out[AUTH_KEY_BYTES]) {
     unsigned char master[crypto_kdf_KEYBYTES];
+    if (sodium_mlock(master, sizeof master) != 0) {
+        return -1;
+    }
 
     int rc = crypto_pwhash(master, sizeof master, password, strlen(password),
                            salt, AUTH_OPSLIMIT, AUTH_MEMLIMIT, crypto_pwhash_ALG_ARGON2ID13);
@@ -125,7 +136,7 @@ static int derive_keys(const char *password, const unsigned char salt[AUTH_SALT_
                                         CTX_KEK, master);
     }
 
-    sodium_memzero(master, sizeof master);
+    wipe_and_unlock(master, sizeof master);
     return rc == 0 ? 0 : -1;
 }
 
@@ -150,6 +161,20 @@ static AuthStatus create_credentials(const char *password, SfmConfig *cfg,
     unsigned char salt[AUTH_SALT_BYTES];
     unsigned char verifier[AUTH_VERIFIER_BYTES];
     unsigned char key[AUTH_KEY_BYTES];
+
+    if (sodium_mlock(salt, sizeof salt) != 0) {
+        return AUTH_ERR_CRYPTO;
+    }
+    if (sodium_mlock(verifier, sizeof verifier) != 0) {
+        wipe_and_unlock(salt, sizeof salt);
+        return AUTH_ERR_CRYPTO;
+    }
+    if (sodium_mlock(key, sizeof key) != 0) {
+        wipe_and_unlock(verifier, sizeof verifier);
+        wipe_and_unlock(salt, sizeof salt);
+        return AUTH_ERR_CRYPTO;
+    }
+
     AuthStatus status = AUTH_ERR_CRYPTO;
 
     randombytes_buf(salt, sizeof salt);
@@ -162,9 +187,9 @@ static AuthStatus create_credentials(const char *password, SfmConfig *cfg,
         status = AUTH_OK;
     }
 
-    sodium_memzero(salt, sizeof salt);
-    sodium_memzero(verifier, sizeof verifier);
-    sodium_memzero(key, sizeof key);
+    wipe_and_unlock(salt, sizeof salt);
+    wipe_and_unlock(verifier, sizeof verifier);
+    wipe_and_unlock(key, sizeof key);
     return status;
 }
 
@@ -213,6 +238,19 @@ AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH
     char confirm[AUTH_PASSWORD_MAX];
     unsigned char key[AUTH_KEY_BYTES];
 
+    if (sodium_mlock(password, sizeof password) != 0) {
+        return AUTH_ERR_CRYPTO;
+    }
+    if (sodium_mlock(confirm, sizeof confirm) != 0) {
+        wipe_and_unlock(password, sizeof password);
+        return AUTH_ERR_CRYPTO;
+    }
+    if (sodium_mlock(key, sizeof key) != 0) {
+        wipe_and_unlock(confirm, sizeof confirm);
+        wipe_and_unlock(password, sizeof password);
+        return AUTH_ERR_CRYPTO;
+    }
+
     AuthStatus status = read_password("Choose a master password: ", password, sizeof password);
 
     if (status == AUTH_OK && password[0] == '\0') {
@@ -242,9 +280,9 @@ AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH
         }
     }
 
-    sodium_memzero(password, sizeof password);
-    sodium_memzero(confirm, sizeof confirm);
-    sodium_memzero(key, sizeof key);
+    wipe_and_unlock(password, sizeof password);
+    wipe_and_unlock(confirm, sizeof confirm);
+    wipe_and_unlock(key, sizeof key);
 
     return status;
 }
@@ -262,8 +300,18 @@ AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out) {
     unsigned char salt[AUTH_SALT_BYTES];
     unsigned char stored[AUTH_VERIFIER_BYTES];
 
+    if (sodium_mlock(salt, sizeof salt) != 0) {
+        return AUTH_ERR_CRYPTO;
+    }
+    if (sodium_mlock(stored, sizeof stored) != 0) {
+        wipe_and_unlock(salt, sizeof salt);
+        return AUTH_ERR_CRYPTO;
+    }
+
     if (!decode_b64(cfg->salt, salt, sizeof salt) ||
         !decode_b64(cfg->verifier, stored, sizeof stored)) {
+        wipe_and_unlock(stored, sizeof stored);
+        wipe_and_unlock(salt, sizeof salt);
         return AUTH_ERR_CONFIG;
     }
 
@@ -275,14 +323,33 @@ AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out) {
         unsigned char verifier[AUTH_VERIFIER_BYTES];
         unsigned char key[AUTH_KEY_BYTES];
 
+        if (sodium_mlock(password, sizeof password) != 0) {
+            status = AUTH_ERR_CRYPTO;
+            break;
+        }
+        if (sodium_mlock(verifier, sizeof verifier) != 0) {
+            wipe_and_unlock(password, sizeof password);
+            status = AUTH_ERR_CRYPTO;
+            break;
+        }
+        if (sodium_mlock(key, sizeof key) != 0) {
+            wipe_and_unlock(verifier, sizeof verifier);
+            wipe_and_unlock(password, sizeof password);
+            status = AUTH_ERR_CRYPTO;
+            break;
+        }
+
         const AuthStatus rs = read_password("Master password: ", password, sizeof password);
         if (rs != AUTH_OK) {
+            wipe_and_unlock(key, sizeof key);
+            wipe_and_unlock(verifier, sizeof verifier);
+            wipe_and_unlock(password, sizeof password);
             status = rs;
             break;
         }
 
         const int rc = derive_keys(password, salt, verifier, key);
-        sodium_memzero(password, sizeof password);
+        wipe_and_unlock(password, sizeof password);
 
         if (rc != 0) {
             status = AUTH_ERR_CRYPTO;
@@ -293,8 +360,8 @@ AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out) {
             status = AUTH_ERR_WRONG_PASSWORD;
         }
 
-        sodium_memzero(verifier, sizeof verifier);
-        sodium_memzero(key, sizeof key);
+        wipe_and_unlock(verifier, sizeof verifier);
+        wipe_and_unlock(key, sizeof key);
 
         if (status != AUTH_ERR_WRONG_PASSWORD) break;
 
@@ -304,8 +371,8 @@ AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out) {
         backoff_sec = (backoff_sec <= (AUTH_BACKOFF_MAX_SEC / 2U)) ? (backoff_sec * 2U) : AUTH_BACKOFF_MAX_SEC;
     }
 
-    sodium_memzero(salt, sizeof salt);
-    sodium_memzero(stored, sizeof stored);
+    wipe_and_unlock(salt, sizeof salt);
+    wipe_and_unlock(stored, sizeof stored);
     return status;
 }
 
