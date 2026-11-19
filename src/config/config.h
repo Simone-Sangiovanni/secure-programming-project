@@ -5,9 +5,9 @@
  * @file config.h
  * @brief Loading, saving and inspecting the application configuration.
  *
- * The configuration is stored on disk as a small JSON file holding the KDF
- * name, the salt and verifier (Base64) used for the master password, and the
- * paths of the vault and log files.
+ * The configuration is stored on disk as a JSON file (~/.config/sfm/sfm.config)
+ * holding the KDF name, the salt and verifier (Base64) used for the master
+ * password, and the paths of the vault, log file, and configuration file itself.
  */
 
 /** In-memory representation of the configuration file. */
@@ -33,9 +33,10 @@ typedef enum {
 /**
  * @brief Loads the configuration file into memory.
  *
- * Missing or non-string JSON keys become empty strings. @p cfg is modified
- * only when the function returns CONFIG_OK, so a failed load never leaves a
- * half-filled struct behind.
+ * Parses the JSON fields ("kdf", "salt", "verifier", "vault", "log", and
+ * "config") and validates path invariants. @p cfg is modified only when the
+ * function returns CONFIG_OK, so a failed load never leaves a half-filled
+ * struct behind.
  *
  * @param file_path Path of the JSON config file to read.
  * @param cfg       Output struct to fill. Must not be NULL.
@@ -48,11 +49,9 @@ typedef enum {
 /**
  * @brief Writes the configuration to disk as JSON.
  *
- * The file is written to a temporary file in the same folder (mode 0600),
- * flushed to disk, and then atomically renamed over @p file_path. Readers
- * therefore see either the old complete file or the new complete file, never
- * a half-written one, and the result is always readable by the owner only
- * (0600), even if @p file_path already existed with other permissions.
+ * Serializes all six configuration fields ("kdf", "salt", "verifier",
+ * "vault", "log", "config") to a temporary file in the same folder (mode
+ * 0600), flushes to disk, and atomically renames over @p file_path.
  *
  * @param file_path Destination path.
  * @param cfg       Configuration to write. Must not be NULL.

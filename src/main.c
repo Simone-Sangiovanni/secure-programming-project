@@ -15,24 +15,11 @@
 #define VAULT_FILE_EXT ".sfm"
 #define VAULT_FILE_EXT_LEN (sizeof VAULT_FILE_EXT - 1)
 
-/**
- * @brief Disables core dumps so secrets in RAM are not written to disk on crash.
- */
 static void disable_core_dumps(void) {
     const struct rlimit zero = {0, 0};
     (void)setrlimit(RLIMIT_CORE, &zero);
 }
 
-/**
- * @brief Checks whether the vault directory already contains any ".sfm" files.
- *
- * Used during first-run detection: if the config file was deleted or blanked
- * while encrypted files already exist in the vault, creating a new master
- * password would generate a new salt and make existing files unrecoverable.
- *
- * @param vault_path Path to the vault directory.
- * @return true if at least one ".sfm" file is present, false otherwise.
- */
 static bool vault_has_encrypted_files(const char *vault_path) {
     if (vault_path == nullptr || vault_path[0] == '\0') return false;
     DIR *dir = opendir(vault_path);
@@ -56,42 +43,31 @@ static bool vault_has_encrypted_files(const char *vault_path) {
 }
 
 /**
- * @brief Creates the folders and files sfm needs on the first run, then
- *        loads the configuration.
- *
- * The configuration file is created by init_setup() if it does not exist, so
- * a failure to load it here is a real error (corrupt or unreadable file).
- * Continuing with defaults would risk overwriting a valid configuration.
- *
- * @param cfg Output configuration.
- * @return true if @p cfg is ready to use, false (after printing why) if not.
+ * @brief Prepares sfm.config, parses it, and recreates/verifies the vault
+ *        directory and log file at the paths specified in sfm.config.
  */
 static bool prepare_config(SfmConfig *cfg) {
     SfmPaths paths;
-    const InitStatus is = init_setup(&paths);
+    InitStatus is = init_prepare_config(&paths);
     if (is != INIT_OK) {
         (void)fprintf(stderr, "Initialization failed: %s\n", init_strerror(is));
         return false;
     }
+
     const ConfigStatus cs = load_config(paths.config_file, cfg);
     if (cs != CONFIG_OK) {
         (void)fprintf(stderr, "Initialization failed: configuration file is missing or invalid.\n");
         return false;
     }
+
+    is = init_ensure_storage(cfg);
+    if (is != INIT_OK) {
+        (void)fprintf(stderr, "Initialization failed: %s\n", init_strerror(is));
+        return false;
+    }
     return true;
 }
 
-/**
- * @brief Creates the master password on the first run, then requires login.
- *
- * After first-run setup succeeds, the temporary setup KEK is wiped and the
- * user is prompted to log in explicitly so the newly saved credentials are
- * verified before entering the interactive shell.
- *
- * @param cfg Loaded configuration (updated and saved on first run).
- * @param key Receives the file-encryption key on success (caller must lock/wipe).
- * @return AUTH_OK on success, otherwise the reason it failed.
- */
 static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]) {
     if (config_is_first_run(cfg)) {
         if (vault_has_encrypted_files(cfg->vault_path)) {
@@ -103,8 +79,7 @@ static AuthStatus authenticate(SfmConfig *cfg, unsigned char key[AUTH_KEY_BYTES]
         }
         printf("No master password set. Let's create one.\n");
         printf("Password must be 8-64 characters long and include an uppercase letter, lowercase letter, number, and special character.\n");
-        const AuthStatus setup_status = auth_setup_master_password(cfg, key);  // also saves the config file
-        // Wipe the temporary setup KEK before requiring explicit login verification.
+        const AuthStatus setup_status = auth_setup_master_password(cfg, key);
         sodium_memzero(key, AUTH_KEY_BYTES);
         log_audit_event(cfg,
                         LOG_EVENT_MASTER_SETUP,
@@ -131,7 +106,7 @@ int main(int argc, char *argv[]) {
     switch (status) {
         case CLI_EXIT_SUCCESS: return EXIT_SUCCESS;
         case CLI_ERROR:        return EXIT_FAILURE;
-        case CLI_OK:           break;  // proceed to run sfm
+        case CLI_OK:           break;
     }
 
     if (sodium_init() < 0) {
@@ -139,8 +114,6 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Ignore Ctrl-C, Ctrl-\, and Ctrl-Z before password entry so an interrupt
-    // cannot leave the terminal with ECHO disabled.
     if (!cli_ignore_signals()) {
         (void)fprintf(stderr, "Cannot protect the process from terminal signals.\n");
         return EXIT_FAILURE;
@@ -156,6 +129,7 @@ int main(int argc, char *argv[]) {
         (void)fprintf(stderr, "Initialization failed: cannot lock key memory.\n");
         return EXIT_FAILURE;
     }
+    cli_register_secret(key, sizeof key);
 
     int exit_code = EXIT_FAILURE;
 
@@ -163,14 +137,14 @@ int main(int argc, char *argv[]) {
     if (as == AUTH_OK) {
         printf("Authenticated.\n");
 
-        // Interactive shell: runs until the user types `exit`.
         const CommandContext ctx = {.cfg = &cfg, .key = key};
         if (cli_run(&ctx) == CLI_EXIT_SUCCESS) exit_code = EXIT_SUCCESS;
     } else {
         (void)fprintf(stderr, "Authentication failed: %s\n", auth_strerror(as));
     }
 
-    sodium_memzero(key, sizeof key);  // wipe the key on every path
+    cli_unregister_secret(key);
+    sodium_memzero(key, sizeof key);
     (void)sodium_munlock(key, sizeof key);
     return exit_code;
 }

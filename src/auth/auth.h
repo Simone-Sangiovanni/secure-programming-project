@@ -9,74 +9,38 @@
  *
  * Scheme:
  *   - salt     = 16 random bytes
- *   - master   = Argon2id(password, salt)                  (32 bytes)
- *   - verifier = KDF(master, id 1, context "sfmverif")     (32 bytes)
- *   - KEK      = KDF(master, id 2, context "sfmkek!!")     (32 bytes)
+ *   - master   = Argon2id(password, salt)                        (32 bytes)
+ *   - verifier = HKDF-SHA256(master, salt, "sfm-verifier-v1")    (32 bytes)
+ *   - KEK      = HKDF-SHA256(master, salt, "sfm-kek-v1")         (32 bytes)
  *
  * The salt and the verifier (both Base64) are stored in the config file.
  * The verifier and the Key-Encryption Key (KEK) are derived from the master
- * key with different KDF contexts, so knowing the verifier (which sits on
- * disk) does not reveal the KEK used to wrap per-file Data-Encryption Keys
- * (DEKs). Sensitive buffers are locked in RAM with sodium_mlock() and wiped
- * with sodium_memzero() / sodium_munlock() immediately after use.
+ * key via RFC 5869 HKDF-SHA256 with distinct domain-separation info labels,
+ * so knowing the verifier (which sits on disk) does not reveal the KEK used
+ * to wrap per-file Data-Encryption Keys (DEKs). Sensitive buffers are locked
+ * in RAM with sodium_mlock(), registered with the termination signal handler,
+ * and wiped with sodium_memzero() / sodium_munlock() immediately after use.
  */
 
-// Max password buffer length: 64 password bytes + '\n' + '\0'
 #define AUTH_PASSWORD_MAX 66
-
-// Size in bytes of the Key-Encryption Key (KEK) returned by setup / login
 #define AUTH_KEY_BYTES 32
 
-// Result codes returned by the auth functions
 typedef enum {
-    AUTH_OK = 0,           /**< Success. */
-    AUTH_ERR_ARGS,         /**< NULL pointer or unusable argument (a bug). */
-    AUTH_ERR_IO,           /**< Terminal could not be read or configured (or EOF). */
-    AUTH_ERR_TOO_LONG,     /**< Password longer than 64 bytes. */
-    AUTH_ERR_EMPTY,        /**< User entered an empty password. */
-    AUTH_ERR_WEAK,         /**< Password does not meet complexity requirements. */
-    AUTH_ERR_MISMATCH,     /**< The two entries did not match. */
-    AUTH_ERR_CRYPTO,       /**< libsodium failure (init, mlock, out of memory, ...). */
-    AUTH_ERR_CONFIG,       /**< Salt/verifier/KDF in the config are missing or corrupt. */
-    AUTH_ERR_SAVE,         /**< The config file could not be written. */
-    AUTH_ERR_WRONG_PASSWORD/**< Password verification failed. */
+    AUTH_OK = 0,
+    AUTH_ERR_ARGS,
+    AUTH_ERR_IO,
+    AUTH_ERR_TOO_LONG,
+    AUTH_ERR_EMPTY,
+    AUTH_ERR_WEAK,
+    AUTH_ERR_MISMATCH,
+    AUTH_ERR_CRYPTO,
+    AUTH_ERR_CONFIG,
+    AUTH_ERR_SAVE,
+    AUTH_ERR_WRONG_PASSWORD
 } AuthStatus;
 
-/**
- * @brief Creates the master password: asks for it, generates the salt and
- *        the verifier, and saves them in the config file.
- *
- * Prompts twice (typed characters are not shown), checks that both entries
- * match, then derives the keys with Argon2id and writes salt, verifier and
- * kdf name to the file at cfg->config_path. @p cfg is modified only if the
- * whole operation, including the save, succeeded.
- *
- * @param cfg     Configuration to update. Must have a non-empty config_path.
- * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK).
- *                The caller should lock it with sodium_mlock() and wipe/unlock
- *                it with sodium_memzero() + sodium_munlock() when done.
- * @return AUTH_OK on success, otherwise the reason it failed.
- */
 [[nodiscard]] AuthStatus auth_setup_master_password(SfmConfig *cfg, unsigned char key_out[AUTH_KEY_BYTES]);
-
-/**
- * @brief Logs in: asks for the master password and checks it against the
- *        verifier stored in the config.
- *
- * Uses constant-time comparison and capped exponential backoff (1s..30s)
- * on wrong attempts to slow down brute-force attacks without permanent lockout.
- *
- * @param cfg     Loaded configuration containing salt and verifier.
- * @param key_out Receives the AUTH_KEY_BYTES-byte Key-Encryption Key (KEK) on
- *                success. The caller should lock it with sodium_mlock() and
- *                wipe/unlock it with sodium_memzero() + sodium_munlock().
- * @return AUTH_OK on success, or an error code if input/config/crypto fails.
- */
 [[nodiscard]] AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out);
-
-/**
- * @brief Returns a human-readable message for an AuthStatus (never NULL).
- */
 [[nodiscard]] const char *auth_strerror(AuthStatus status);
 
 #endif

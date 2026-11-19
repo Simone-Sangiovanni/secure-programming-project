@@ -21,6 +21,28 @@ static bool copy_json_field(char *dst, size_t dst_size, const cJSON *item) {
     return copy_str(dst, dst_size, cJSON_IsString(item) ? item->valuestring : "");
 }
 
+static bool has_traversal_component(const char *path, size_t len) {
+    return strstr(path, "/../") != nullptr ||
+           strstr(path, "/./") != nullptr ||
+           (len >= 3 && strcmp(path + len - 3, "/..") == 0) ||
+           (len >= 2 && strcmp(path + len - 2, "/.") == 0);
+}
+
+static bool is_valid_configured_path(const char *path, bool allow_trailing_slash) {
+    if (path == nullptr || path[0] != '/') return false;
+    const size_t len = strlen(path);
+    if (len == 0 || has_traversal_component(path, len)) return false;
+    if (!allow_trailing_slash && path[len - 1] == '/') return false;
+    return true;
+}
+
+static void strip_trailing_slashes(char *path) {
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') {
+        path[--len] = '\0';
+    }
+}
+
 static ConfigStatus read_file(const char *path, char **out, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (f == nullptr) {
@@ -66,6 +88,7 @@ ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
         !copy_str(tmp.config_path, sizeof tmp.config_path, config_path)) {
         return CONFIG_ERR_INVALID;
     }
+    strip_trailing_slashes(tmp.vault_path);
     *cfg = tmp;
     return CONFIG_OK;
 }
@@ -95,10 +118,27 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
                         cJSON_GetObjectItemCaseSensitive(json, "vault")) &&
         copy_json_field(tmp.log_path, sizeof tmp.log_path,
                         cJSON_GetObjectItemCaseSensitive(json, "log")) &&
-        copy_str(tmp.config_path, sizeof tmp.config_path, file_path);
+        copy_json_field(tmp.config_path, sizeof tmp.config_path,
+                        cJSON_GetObjectItemCaseSensitive(json, "config"));
 
     cJSON_Delete(json);
     if (!ok) return CONFIG_ERR_INVALID;
+
+    // If "config" was omitted in JSON, default to file_path; otherwise verify consistency.
+    if (tmp.config_path[0] == '\0') {
+        if (!copy_str(tmp.config_path, sizeof tmp.config_path, file_path)) {
+            return CONFIG_ERR_INVALID;
+        }
+    } else if (strcmp(tmp.config_path, file_path) != 0) {
+        return CONFIG_ERR_INVALID;
+    }
+
+    if (!is_valid_configured_path(tmp.vault_path, true) ||
+        !is_valid_configured_path(tmp.log_path, false) ||
+        !is_valid_configured_path(tmp.config_path, false)) {
+        return CONFIG_ERR_INVALID;
+    }
+    strip_trailing_slashes(tmp.vault_path);
 
     // Reject a partially populated credential state (salt without verifier or vice versa).
     const bool has_salt = (tmp.salt[0] != '\0');
@@ -114,13 +154,17 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
 ConfigStatus save_config(const char *file_path, const SfmConfig *cfg) {
     if (file_path == nullptr || cfg == nullptr) return CONFIG_ERR_ARGS;
 
+    const char *effective_config_path =
+        (cfg->config_path[0] != '\0') ? cfg->config_path : file_path;
+
     cJSON *json = cJSON_CreateObject();
     if (json == nullptr) return CONFIG_ERR_IO;
     if (!cJSON_AddStringToObject(json, "kdf", cfg->kdf) ||
         !cJSON_AddStringToObject(json, "salt", cfg->salt) ||
         !cJSON_AddStringToObject(json, "verifier", cfg->verifier) ||
         !cJSON_AddStringToObject(json, "vault", cfg->vault_path) ||
-        !cJSON_AddStringToObject(json, "log", cfg->log_path)) {
+        !cJSON_AddStringToObject(json, "log", cfg->log_path) ||
+        !cJSON_AddStringToObject(json, "config", effective_config_path)) {
         cJSON_Delete(json);
         return CONFIG_ERR_IO;
     }

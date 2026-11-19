@@ -2,40 +2,41 @@
 #define SFM_INIT_H
 
 #include <stddef.h>
+#include "../config/config.h"
 
 /**
  * @file init.h
- * @brief First-run initialisation of the files and folders sfm uses.
+ * @brief Initialisation and recovery of the files and folders sfm uses.
  *
- * Layout created in the home directory of the user running sfm:
+ * Default layout created in the home directory of the user running sfm:
  *
- *   ~/.config/sfm/config.json        configuration file         (0600)
+ *   ~/.config/sfm/sfm.config         configuration file         (0600)
  *   ~/.local/state/sfm/sfm.log       log file                   (0600)
  *   ~/.local/share/sfm/vault/        vault folder               (0700)
  *
- * Every folder named "sfm" (and "vault") is created with mode 0700 and
- * every file with mode 0600, so only the owner can read, write or enter them.
+ * Every folder belonging to sfm is created with mode 0700 and every file with
+ * mode 0600, so only the owner can read, write or enter them.
  *
- * Everything is created by the sfm process itself, running with the user's
- * own privileges, so it automatically belongs to the user. For the same
- * reason sfm refuses to run as root: a root process creating files inside a
- * user's home would leave them owned by root.
- *
- * Running init again is safe: what exists is checked (and its permissions
- * are tightened if needed), what is missing is created.
+ * Startup runs in two stages so custom paths stored in sfm.config are honoured:
+ *   1. init_prepare_config() ensures ~/.config/sfm/sfm.config exists (writing
+ *      the default configuration if missing) and verifies its owner and 0600
+ *      permissions without touching the vault or log yet.
+ *   2. After load_config() parses sfm.config, init_ensure_storage() creates or
+ *      verifies the vault directory and log file at the exact paths configured
+ *      in sfm.config (recreating them if either was deleted).
  */
 
 /** Size of the path buffers (same as the path fields of SfmConfig). */
 #define INIT_PATH_MAX 512
 
-/** The locations sfm uses. All are absolute paths. */
+/** The default locations sfm uses. All are absolute paths. */
 typedef struct {
-    char config_file[INIT_PATH_MAX];  /**< ~/.config/sfm/config.json */
+    char config_file[INIT_PATH_MAX];  /**< ~/.config/sfm/sfm.config */
     char log_file[INIT_PATH_MAX];     /**< ~/.local/state/sfm/sfm.log */
     char vault_dir[INIT_PATH_MAX];    /**< ~/.local/share/sfm/vault */
 } SfmPaths;
 
-/** Result codes returned by init_setup(). */
+/** Result codes returned by init functions. */
 typedef enum {
     INIT_OK = 0,             /**< Everything exists with the right permissions. */
     INIT_ERR_ARGS,           /**< NULL pointer passed by the caller (a bug). */
@@ -54,22 +55,37 @@ typedef enum {
 } InitStatus;
 
 /**
- * @brief Creates (or verifies) the whole layout and reports where it is.
+ * @brief Ensures the configuration folder (~/.config/sfm) and configuration
+ *        file (~/.config/sfm/sfm.config) exist with valid ownership and
+ *        permissions (0700 folder, 0600 file).
  *
- * Steps: refuse root -> find the home directory ($HOME, or the password
- * database if unset) -> create/verify the three locations -> create the
- * default configuration if config.json does not exist yet.
+ * If sfm.config does not exist yet, writes the default configuration using the
+ * user's default XDG paths. Does not create or modify the vault or log file;
+ * call init_ensure_storage() after load_config() so configured paths are used.
  *
- * Folders are walked with file descriptors (openat/mkdirat) and symbolic
- * links are refused for sfm's own folders and files, so a link planted by
- * someone else cannot redirect sfm to another place.
+ * @param paths Receives the resolved default paths on success.
+ * @return INIT_OK or the reason it failed.
+ */
+[[nodiscard]] InitStatus init_prepare_config(SfmPaths *paths);
+
+/**
+ * @brief Recreates or verifies the vault directory and log file specified in
+ *        the loaded configuration @p cfg.
  *
- * The standard parent folders (~/.config, ~/.local/state, ~/.local/share) are
- * created with mode 0700 if missing, but if they already exist they are left
- * exactly as they are (they belong to the user's other programs, and
- * ~/.config is often a symlink to a dotfiles repository).
+ * Walks directory components with openat/mkdirat, refuses symlinks on sfm's
+ * own folders and files (O_NOFOLLOW), verifies owner UID == geteuid(), and
+ * enforces mode 0700 on sfm directories and mode 0600 on the log file.
  *
- * @param paths Receives the absolute paths on success (untouched on failure).
+ * @param cfg Loaded configuration containing vault_path and log_path.
+ * @return INIT_OK or the reason it failed.
+ */
+[[nodiscard]] InitStatus init_ensure_storage(const SfmConfig *cfg);
+
+/**
+ * @brief Convenience wrapper that prepares sfm.config, loads it, and ensures
+ *        the configured vault and log storage exist.
+ *
+ * @param paths Receives the resolved default paths on success.
  * @return INIT_OK or the reason it failed.
  */
 [[nodiscard]] InitStatus init_setup(SfmPaths *paths);

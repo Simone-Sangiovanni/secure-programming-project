@@ -2,13 +2,24 @@
 #include <ctype.h>
 #include <signal.h>
 #include <sodium.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>  // POSIX getopt, isatty
+#include <unistd.h>  // POSIX getopt, isatty, _exit
 
-#define CLI_PROMPT      "sfm> "
-#define CLI_LINE_MAX    1025  // 1023 command chars + '\n' + '\0'
-#define CLI_MAX_TOKENS  8     // command name + arguments
+#define CLI_PROMPT       "sfm> "
+#define CLI_LINE_MAX     1025  // 1023 command chars + '\n' + '\0'
+#define CLI_MAX_TOKENS   8     // command name + arguments
+#define SECRET_SLOTS_MAX 16
+
+typedef struct {
+    volatile void *ptr;
+    size_t len;
+} SecretSlot;
+
+static SecretSlot secret_slots[SECRET_SLOTS_MAX] = {};
+static volatile sig_atomic_t has_saved_termios = 0;
+static struct termios saved_termios_copy = {};
 
 void cli_print_help(void) {
     printf("Usage: %s [OPTION]\n\n", program_name);
@@ -26,8 +37,8 @@ CliStatus cli_parse(int argc, char **argv) {
         return CLI_OK;
     }
 
-    opterr = 0;  // disable getopt error messages
-    optind = 1;  // tracks which element of argv will be processed next: skip argv[0]
+    opterr = 0;
+    optind = 1;
 
     bool want_help = false;
     bool want_version = false;
@@ -63,16 +74,133 @@ CliStatus cli_parse(int argc, char **argv) {
     return CLI_OK;
 }
 
+/* ================= signal handling & secret registry ================= */
+
+static const int ignored_signals[] = {SIGINT, SIGQUIT, SIGTSTP};
+static const int term_signals[] = {SIGTERM, SIGHUP};
+
+static void block_term_signals(sigset_t *old_mask) {
+    sigset_t mask;
+    sigemptyset(&mask);
+    for (size_t i = 0; i < sizeof term_signals / sizeof term_signals[0]; i++) {
+        (void)sigaddset(&mask, term_signals[i]);
+    }
+    (void)sigprocmask(SIG_BLOCK, &mask, old_mask);
+}
+
+static void restore_signal_mask(const sigset_t *old_mask) {
+    (void)sigprocmask(SIG_SETMASK, old_mask, nullptr);
+}
+
+/**
+ * @brief Async-signal-safe termination handler: zeroes every registered
+ *        secret buffer in RAM, restores terminal ECHO if active, and exits.
+ */
+static void handle_termination_signal(int sig) {
+    for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
+        volatile unsigned char *p = (volatile unsigned char *)secret_slots[i].ptr;
+        const size_t n = secret_slots[i].len;
+        if (p != nullptr && n > 0) {
+            for (size_t j = 0; j < n; j++) {
+                p[j] = 0U;
+            }
+        }
+    }
+
+    if (has_saved_termios != 0) {
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios_copy);
+    }
+
+    _exit(128 + sig);
+}
+
+void cli_register_secret(volatile void *ptr, size_t len) {
+    if (ptr == nullptr || len == 0) return;
+
+    sigset_t old_mask;
+    block_term_signals(&old_mask);
+
+    for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
+        if (secret_slots[i].ptr == nullptr) {
+            secret_slots[i].len = len;
+            atomic_signal_fence(memory_order_seq_cst);
+            secret_slots[i].ptr = ptr;
+            break;
+        }
+    }
+
+    restore_signal_mask(&old_mask);
+}
+
+void cli_unregister_secret(volatile void *ptr) {
+    if (ptr == nullptr) return;
+
+    sigset_t old_mask;
+    block_term_signals(&old_mask);
+
+    for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
+        if (secret_slots[i].ptr == ptr) {
+            secret_slots[i].ptr = nullptr;
+            atomic_signal_fence(memory_order_seq_cst);
+            secret_slots[i].len = 0;
+            break;
+        }
+    }
+
+    restore_signal_mask(&old_mask);
+}
+
+void cli_register_termios(const struct termios *saved) {
+    if (saved == nullptr) return;
+
+    sigset_t old_mask;
+    block_term_signals(&old_mask);
+
+    saved_termios_copy = *saved;
+    atomic_signal_fence(memory_order_seq_cst);
+    has_saved_termios = 1;
+
+    restore_signal_mask(&old_mask);
+}
+
+void cli_unregister_termios(void) {
+    sigset_t old_mask;
+    block_term_signals(&old_mask);
+
+    has_saved_termios = 0;
+
+    restore_signal_mask(&old_mask);
+}
+
+bool cli_ignore_signals(void) {
+    struct sigaction ignore = {};
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+
+    for (size_t i = 0; i < sizeof ignored_signals / sizeof ignored_signals[0]; i++) {
+        if (sigaction(ignored_signals[i], &ignore, nullptr) != 0) return false;
+    }
+
+    struct sigaction terminate = {};
+    terminate.sa_handler = handle_termination_signal;
+    sigfillset(&terminate.sa_mask);
+
+    for (size_t i = 0; i < sizeof term_signals / sizeof term_signals[0]; i++) {
+        if (sigaction(term_signals[i], &terminate, nullptr) != 0) return false;
+    }
+
+    return true;
+}
+
 /* ================= interactive shell ================= */
 
-/** One entry of the command table. To add a command, add a row here. */
 typedef struct {
-    const char *name;         // what the user types
-    CommandHandler handler;   // function in commands.c
-    int min_args;             // accepted number of arguments (after the name)
+    const char *name;
+    CommandHandler handler;
+    int min_args;
     int max_args;
-    const char *usage;        // shown on wrong usage and in 'help'
-    const char *description;  // shown in 'help'
+    const char *usage;
+    const char *description;
 } CliCommand;
 
 static const CliCommand command_table[] = {
@@ -83,25 +211,9 @@ static const CliCommand command_table[] = {
 };
 
 #define COMMAND_COUNT (sizeof command_table / sizeof command_table[0])
-
-// Return values of tokenize() on error
 #define TOKENIZE_TOO_MANY (-1)
 #define TOKENIZE_OPEN_QUOTE (-2)
 
-/**
- * @brief Splits a line into words, in place.
- *
- * Words are separated by whitespace. Double quotes group text that contains
- * spaces (e.g. encrypt "/home/me/my file.txt"); the quotes themselves are
- * removed. @p line is modified: each word is NUL-terminated inside it.
- *
- * @param line     Line to split (modified).
- * @param tokens   Output array receiving a pointer to each word.
- * @param max      Capacity of @p tokens.
- * @return Number of words (0 for an empty line), TOKENIZE_TOO_MANY if there
- *         are more than @p max words, TOKENIZE_OPEN_QUOTE if a quote is
- *         never closed.
- */
 static int tokenize(char *line, char *tokens[], int max) {
     int count = 0;
     char *p = line;
@@ -111,7 +223,7 @@ static int tokenize(char *line, char *tokens[], int max) {
         if (*p == '\0') break;
         if (count == max) return TOKENIZE_TOO_MANY;
 
-        char *out = p;  // write position (never ahead of the read position)
+        char *out = p;
         tokens[count++] = out;
         bool in_quotes = false;
 
@@ -134,9 +246,6 @@ static int tokenize(char *line, char *tokens[], int max) {
     return count;
 }
 
-/**
- * @brief Returns the table entry for a command name, or NULL if unknown.
- */
 static const CliCommand *find_command(const char *name) {
     for (size_t i = 0; i < COMMAND_COUNT; i++) {
         if (strcmp(command_table[i].name, name) == 0) return &command_table[i];
@@ -144,9 +253,6 @@ static const CliCommand *find_command(const char *name) {
     return nullptr;
 }
 
-/**
- * @brief Prints the list of shell commands.
- */
 static void print_shell_help(void) {
     printf("Commands:\n");
     for (size_t i = 0; i < COMMAND_COUNT; i++) {
@@ -157,14 +263,6 @@ static void print_shell_help(void) {
     printf("Tip: use double quotes around paths that contain spaces.\n");
 }
 
-/**
- * @brief Parses and runs one input line.
- *
- * @param ctx  Context passed to the command.
- * @param line Input line without the trailing newline (modified).
- * @return false if the user asked to leave the shell, true otherwise
- *         (including after any user mistake).
- */
 static bool execute_line(const CommandContext *ctx, char *line) {
     char *tokens[CLI_MAX_TOKENS];
     const int count = tokenize(line, tokens, CLI_MAX_TOKENS);
@@ -177,7 +275,7 @@ static bool execute_line(const CommandContext *ctx, char *line) {
         (void)fprintf(stderr, "Missing closing quote.\n");
         return true;
     }
-    if (count == 0) return true;  // empty line
+    if (count == 0) return true;
 
     const char *name = tokens[0];
     if (strcmp(name, "exit") == 0) return false;
@@ -206,28 +304,12 @@ static bool execute_line(const CommandContext *ctx, char *line) {
     return true;
 }
 
-// Signals ignored while the process runs: Ctrl-C, Ctrl-\ and Ctrl-Z
-static const int ignored_signals[] = {SIGINT, SIGQUIT, SIGTSTP};
-
-bool cli_ignore_signals(void) {
-    struct sigaction ignore = {};
-    ignore.sa_handler = SIG_IGN;
-    sigemptyset(&ignore.sa_mask);
-
-    for (size_t i = 0; i < sizeof ignored_signals / sizeof ignored_signals[0]; i++) {
-        if (sigaction(ignored_signals[i], &ignore, nullptr) != 0) return false;
-    }
-    return true;
-}
-
-/**
- * @brief The read-parse-execute loop. Returns only when the user types `exit`
- *        or when the input is lost for good.
- */
 static CliStatus shell_loop(const CommandContext *ctx) {
     printf("Type 'help' for the list of commands, 'exit' to quit.\n");
 
     char line[CLI_LINE_MAX];
+    cli_register_secret(line, sizeof line);
+
     while (true) {
         (void)fputs(CLI_PROMPT, stdout);
         (void)fflush(stdout);
@@ -235,10 +317,12 @@ static CliStatus shell_loop(const CommandContext *ctx) {
         if (fgets(line, sizeof line, stdin) == nullptr) {
             sodium_memzero(line, sizeof line);
             if (ferror(stdin)) {
+                cli_unregister_secret(line);
                 (void)fprintf(stderr, "Error reading input.\n");
                 return CLI_ERROR;
             }
             if (!isatty(STDIN_FILENO)) {
+                cli_unregister_secret(line);
                 (void)fprintf(stderr, "\nInput closed.\n");
                 return CLI_ERROR;
             }
@@ -258,12 +342,15 @@ static CliStatus shell_loop(const CommandContext *ctx) {
             continue;
         } else {
             sodium_memzero(line, sizeof line);
-            continue;  // partial line cut short by end of input; ignore it
+            continue;
         }
 
         const bool keep_running = execute_line(ctx, line);
         sodium_memzero(line, sizeof line);
-        if (!keep_running) return CLI_EXIT_SUCCESS;
+        if (!keep_running) {
+            cli_unregister_secret(line);
+            return CLI_EXIT_SUCCESS;
+        }
     }
 }
 

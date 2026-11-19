@@ -7,20 +7,18 @@
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#include "../config/config.h"
 
 // Unsigned octal constants (no signed int in bitwise operations).
 #define DIR_MODE   ((mode_t)0700)  // drwx------  owner only
 #define FILE_MODE  ((mode_t)0600)  // -rw-------  owner only
 #define MODE_BITS  07777U          // permission bits + setuid/setgid/sticky
 
-// Names of the files, and their locations relative to the home directory.
-// (The folder chains below must describe the same places as these paths.)
-#define CONFIG_NAME     "config.json"
+// Names of the files, and their default locations relative to the home directory.
+#define CONFIG_NAME     "sfm.config"
 #define LOG_NAME        "sfm.log"
 #define REL_CONFIG_FILE ".config/sfm/" CONFIG_NAME
 #define REL_LOG_FILE    ".local/state/sfm/" LOG_NAME
@@ -41,25 +39,9 @@ typedef struct {
 } DirStep;
 
 static const DirStep CONFIG_CHAIN[] = {{".config", false}, {"sfm", true}};
-static const DirStep STATE_CHAIN[]  = {{".local", false}, {"state", false}, {"sfm", true}};
-static const DirStep DATA_CHAIN[]   = {{".local", false}, {"share", false}, {"sfm", true}, {"vault", true}};
-
-
 
 /* ---------- helpers (private to this file) ---------- */
 
-
-
-/**
- * @brief Finds the home directory of the current user.
- *
- * Uses $HOME when set; otherwise asks the password database. The result must
- * be an absolute path. Trailing slashes are removed.
- *
- * @param out  Receives the path.
- * @param size Size of @p out.
- * @return INIT_OK, INIT_ERR_NO_HOME, INIT_ERR_BAD_HOME or INIT_ERR_PATH_TOO_LONG.
- */
 static InitStatus get_home(char *out, size_t size) {
     const char *home = getenv("HOME");
 
@@ -80,43 +62,22 @@ static InitStatus get_home(char *out, size_t size) {
 
     size_t len = (size_t)n;
     while (len > 0 && out[len - 1] == '/') out[--len] = '\0';
-    if (len == 0) return INIT_ERR_BAD_HOME;  // "/" is not a home directory
+    if (len == 0) return INIT_ERR_BAD_HOME;
     return INIT_OK;
 }
 
-/**
- * @brief Builds "<home>/<relative>" into @p out, refusing to truncate.
- * @return true if it fitted.
- */
 static bool join_path(char *out, size_t size, const char *home, const char *relative) {
     const int n = snprintf(out, size, "%s/%s", home, relative);
     return n >= 0 && (size_t)n < size;
 }
 
-/**
- * @brief Closes a file descriptor if it is open.
- */
 static void close_fd(int fd) {
     if (fd >= 0) (void)close(fd);
 }
 
-/**
- * @brief Creates one folder (if missing) and opens it.
- *
- * mkdirat/openat work relative to the already-open parent folder, so nothing
- * can swap a parent for a symlink between two steps. For sfm's own folders
- * (step->owned) the folder must not be a symlink, must belong to the current
- * user, and is forced to mode 0700 (fchmod also overrides the umask).
- *
- * @param parent_fd Open parent folder.
- * @param step      Folder to create/open.
- * @param out_fd    Receives the open folder (the caller closes it).
- * @return INIT_OK or the reason it failed.
- */
 static InitStatus open_dir_step(int parent_fd, const DirStep *step, int *out_fd) {
     if (mkdirat(parent_fd, step->name, DIR_MODE) != 0 && errno != EEXIST) return INIT_ERR_MKDIR;
 
-    // For sfm's own folders a symlink would be an attack, so O_NOFOLLOW.
     const int fd = openat(parent_fd, step->name,
                           step->owned ? (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
                                       : (O_RDONLY | O_DIRECTORY | O_CLOEXEC));
@@ -136,14 +97,6 @@ static InitStatus open_dir_step(int parent_fd, const DirStep *step, int *out_fd)
     return INIT_OK;
 }
 
-/**
- * @brief Creates/opens every folder of a chain, starting below @p base_fd.
- *
- * @param base_fd Open starting folder (the home directory). Not closed here.
- * @param steps   The folders, outermost first.
- * @param count   Number of folders.
- * @param out_fd  Receives the innermost folder (the caller closes it).
- */
 static InitStatus ensure_chain(int base_fd, const DirStep *steps, size_t count, int *out_fd) {
     int parent = base_fd;
     for (size_t i = 0; i < count; i++) {
@@ -157,15 +110,6 @@ static InitStatus ensure_chain(int base_fd, const DirStep *steps, size_t count, 
     return INIT_OK;
 }
 
-/**
- * @brief Checks an existing file and forces it to mode 0600.
- *
- * It must be a regular file (not a symlink, folder or pipe) owned by the
- * current user. O_NONBLOCK stops an attacker's named pipe from hanging us.
- *
- * @param dir_fd Open folder containing the file.
- * @param name   File name inside that folder.
- */
 static InitStatus verify_file(int dir_fd, const char *name) {
     const int fd = openat(dir_fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return (errno == ELOOP) ? INIT_ERR_NOT_FILE : INIT_ERR_ACCESS;
@@ -186,12 +130,6 @@ static InitStatus verify_file(int dir_fd, const char *name) {
     return result;
 }
 
-/**
- * @brief Creates an empty file (mode 0600) if it does not exist, then verifies it.
- *
- * O_EXCL makes creation atomic: it never opens a file someone else created
- * in the meantime, and O_NOFOLLOW never follows a planted symlink.
- */
 static InitStatus ensure_empty_file(int dir_fd, const char *name) {
     const int fd = openat(dir_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, FILE_MODE);
     if (fd >= 0) {
@@ -202,17 +140,10 @@ static InitStatus ensure_empty_file(int dir_fd, const char *name) {
     return verify_file(dir_fd, name);
 }
 
-/**
- * @brief Makes sure config.json exists (writing the default configuration if
- *        not) and has the right owner and permissions.
- *
- * An existing file is NOT rewritten or validated here: a corrupt config is
- * reported later by load_config() instead of being silently replaced.
- */
 static InitStatus ensure_config_file(int dir_fd, const SfmPaths *paths) {
     const int fd = openat(dir_fd, CONFIG_NAME, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd >= 0) {
-        close_fd(fd);  // it exists: verify_file() below checks it
+        close_fd(fd);
     } else if (errno == ENOENT) {
         SfmConfig cfg;
         if (config_set_defaults(&cfg, paths->config_file, paths->vault_dir, paths->log_file) != CONFIG_OK ||
@@ -225,16 +156,125 @@ static InitStatus ensure_config_file(int dir_fd, const SfmPaths *paths) {
     return verify_file(dir_fd, CONFIG_NAME);
 }
 
+static bool has_traversal(const char *path, size_t len) {
+    return strstr(path, "/../") != nullptr ||
+           strstr(path, "/./") != nullptr ||
+           (len >= 3 && strcmp(path + len - 3, "/..") == 0) ||
+           (len >= 2 && strcmp(path + len - 2, "/.") == 0);
+}
 
+/**
+ * @brief Walks an arbitrary configured absolute directory path from "/",
+ *        creating any missing directories (0700) and enforcing O_NOFOLLOW,
+ *        owner UID, and 0700 permissions on newly created directories, "sfm" /
+ *        "vault" directories, and optionally the final leaf directory.
+ */
+static InitStatus ensure_configured_dir(const char *dir_path, bool enforce_leaf, int *out_dir_fd) {
+    if (dir_path == nullptr || dir_path[0] != '/') return INIT_ERR_BAD_HOME;
+    const size_t raw_len = strlen(dir_path);
+    if (raw_len == 0 || has_traversal(dir_path, raw_len)) return INIT_ERR_BAD_HOME;
+
+    char copy[INIT_PATH_MAX];
+    const int n = snprintf(copy, sizeof copy, "%s", dir_path);
+    if (n < 0 || (size_t)n >= sizeof copy) return INIT_ERR_PATH_TOO_LONG;
+
+    size_t len = (size_t)n;
+    while (len > 1 && copy[len - 1] == '/') {
+        copy[--len] = '\0';
+    }
+
+    int parent_fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) return INIT_ERR_ACCESS;
+
+    if (strcmp(copy, "/") == 0) {
+        if (enforce_leaf) {
+            close_fd(parent_fd);
+            return INIT_ERR_OWNER;
+        }
+        if (out_dir_fd != nullptr) {
+            *out_dir_fd = parent_fd;
+        } else {
+            close_fd(parent_fd);
+        }
+        return INIT_OK;
+    }
+
+    const char *comps[INIT_PATH_MAX / 2];
+    size_t comp_count = 0;
+    char *p = copy + 1;
+    while (*p != '\0') {
+        while (*p == '/') p++;
+        if (*p == '\0') break;
+        comps[comp_count++] = p;
+        while (*p != '\0' && *p != '/') p++;
+        if (*p == '/') {
+            *p = '\0';
+            p++;
+        }
+    }
+
+    if (comp_count == 0) {
+        close_fd(parent_fd);
+        return INIT_ERR_BAD_HOME;
+    }
+
+    for (size_t i = 0; i < comp_count; i++) {
+        const char *comp = comps[i];
+        const bool is_leaf = (i + 1 == comp_count);
+        const bool is_sfm_named = (strcmp(comp, "sfm") == 0 || strcmp(comp, "vault") == 0);
+
+        bool created = false;
+        if (mkdirat(parent_fd, comp, DIR_MODE) == 0) {
+            created = true;
+        } else if (errno != EEXIST) {
+            close_fd(parent_fd);
+            return INIT_ERR_MKDIR;
+        }
+
+        const bool must_own = created || is_sfm_named || (is_leaf && enforce_leaf);
+        const int flags = must_own ? (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+                                   : (O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const int fd = openat(parent_fd, comp, flags);
+        close_fd(parent_fd);
+        if (fd < 0) {
+            return (errno == ELOOP || errno == ENOTDIR) ? INIT_ERR_NOT_DIR : INIT_ERR_ACCESS;
+        }
+
+        if (must_own) {
+            struct stat st;
+            if (fstat(fd, &st) != 0) {
+                close_fd(fd);
+                return INIT_ERR_ACCESS;
+            }
+            if (!S_ISDIR(st.st_mode)) {
+                close_fd(fd);
+                return INIT_ERR_NOT_DIR;
+            }
+            if (st.st_uid != geteuid()) {
+                close_fd(fd);
+                return INIT_ERR_OWNER;
+            }
+            if ((st.st_mode & MODE_BITS) != DIR_MODE && fchmod(fd, DIR_MODE) != 0) {
+                close_fd(fd);
+                return INIT_ERR_PERMS;
+            }
+        }
+
+        parent_fd = fd;
+    }
+
+    if (out_dir_fd != nullptr) {
+        *out_dir_fd = parent_fd;
+    } else {
+        close_fd(parent_fd);
+    }
+    return INIT_OK;
+}
 
 /* ---------- public API (full contract documented in init.h) ---------- */
 
-
-
-InitStatus init_setup(SfmPaths *paths) {
+InitStatus init_prepare_config(SfmPaths *paths) {
     if (paths == nullptr) return INIT_ERR_ARGS;
-
-    // Files created by root would belong to root, not to the user.
     if (geteuid() == 0) return INIT_ERR_ROOT;
 
     char home[INIT_PATH_MAX];
@@ -252,28 +292,71 @@ InitStatus init_setup(SfmPaths *paths) {
     if (home_fd < 0) return INIT_ERR_BAD_HOME;
 
     int config_fd = -1;
-    int state_fd = -1;
-    int vault_fd = -1;
-
     st = ensure_chain(home_fd, CONFIG_CHAIN, sizeof CONFIG_CHAIN / sizeof CONFIG_CHAIN[0], &config_fd);
     if (st == INIT_OK) st = ensure_config_file(config_fd, &result);
 
-    if (st == INIT_OK) {
-        st = ensure_chain(home_fd, STATE_CHAIN, sizeof STATE_CHAIN / sizeof STATE_CHAIN[0], &state_fd);
-    }
-    if (st == INIT_OK) st = ensure_empty_file(state_fd, LOG_NAME);
-
-    if (st == INIT_OK) {
-        st = ensure_chain(home_fd, DATA_CHAIN, sizeof DATA_CHAIN / sizeof DATA_CHAIN[0], &vault_fd);
-    }
-
-    close_fd(vault_fd);
-    close_fd(state_fd);
     close_fd(config_fd);
     close_fd(home_fd);
 
     if (st == INIT_OK) *paths = result;
     return st;
+}
+
+InitStatus init_ensure_storage(const SfmConfig *cfg) {
+    if (cfg == nullptr) return INIT_ERR_ARGS;
+    if (geteuid() == 0) return INIT_ERR_ROOT;
+
+    if (cfg->vault_path[0] != '/' || cfg->log_path[0] != '/') {
+        return INIT_ERR_BAD_HOME;
+    }
+
+    const size_t log_len = strlen(cfg->log_path);
+    if (log_len == 0 || cfg->log_path[log_len - 1] == '/' || has_traversal(cfg->log_path, log_len)) {
+        return INIT_ERR_BAD_HOME;
+    }
+
+    // 1. Recreate or verify the configured vault directory (0700, owner check).
+    InitStatus st = ensure_configured_dir(cfg->vault_path, true, nullptr);
+    if (st != INIT_OK) return st;
+
+    // 2. Split cfg->log_path into parent directory + file name, then recreate/verify both.
+    const char *last_slash = strrchr(cfg->log_path, '/');
+    if (last_slash == nullptr) return INIT_ERR_BAD_HOME;
+
+    const char *log_name = last_slash + 1;
+    if (log_name[0] == '\0' || strcmp(log_name, ".") == 0 || strcmp(log_name, "..") == 0) {
+        return INIT_ERR_NOT_FILE;
+    }
+
+    char log_dir[INIT_PATH_MAX];
+    if (last_slash == cfg->log_path) {
+        log_dir[0] = '/';
+        log_dir[1] = '\0';
+    } else {
+        const size_t dir_len = (size_t)(last_slash - cfg->log_path);
+        if (dir_len >= sizeof log_dir) return INIT_ERR_PATH_TOO_LONG;
+        memcpy(log_dir, cfg->log_path, dir_len);
+        log_dir[dir_len] = '\0';
+    }
+
+    int log_dir_fd = -1;
+    st = ensure_configured_dir(log_dir, false, &log_dir_fd);
+    if (st != INIT_OK) return st;
+
+    st = ensure_empty_file(log_dir_fd, log_name);
+    close_fd(log_dir_fd);
+    return st;
+}
+
+InitStatus init_setup(SfmPaths *paths) {
+    const InitStatus st = init_prepare_config(paths);
+    if (st != INIT_OK) return st;
+
+    SfmConfig cfg;
+    if (load_config(paths->config_file, &cfg) != CONFIG_OK) {
+        return INIT_ERR_CONFIG;
+    }
+    return init_ensure_storage(&cfg);
 }
 
 const char *init_strerror(InitStatus status) {
@@ -282,7 +365,7 @@ const char *init_strerror(InitStatus status) {
         case INIT_ERR_ARGS:          return "invalid arguments (internal error)";
         case INIT_ERR_ROOT:          return "sfm must not run as root (files created in a user's home would belong to root)";
         case INIT_ERR_NO_HOME:       return "cannot determine the home directory ($HOME is unset and the user has no entry)";
-        case INIT_ERR_BAD_HOME:      return "the home directory is not an absolute path to an existing directory";
+        case INIT_ERR_BAD_HOME:      return "the home directory is not an absolute path to a directory";
         case INIT_ERR_PATH_TOO_LONG: return "a path is too long (the home directory path is too long)";
         case INIT_ERR_MKDIR:         return "cannot create a folder";
         case INIT_ERR_ACCESS:        return "cannot open a folder or file (permissions?)";
