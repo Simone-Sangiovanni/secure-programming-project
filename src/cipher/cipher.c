@@ -7,34 +7,46 @@
 #define MAGIC                "SFM1"
 #define MAGIC_LEN            4U
 #define FORMAT_VERSION       3U
-#define VERSION_OFFSET       MAGIC_LEN
-#define AD_LEN               (MAGIC_LEN + 1U)  // magic + version: authenticated, not encrypted
+#define AD_LEN               (MAGIC_LEN + 1U)
 
-#define WRAP_NONCE_BYTES     crypto_aead_xchacha20poly1305_ietf_NPUBBYTES  // 24
-#define WRAPPED_DEK_BYTES    (CIPHER_KEY_BYTES + crypto_aead_xchacha20poly1305_ietf_ABYTES)  // 32 + 16 = 48
+#define WRAP_NONCE_BYTES     crypto_aead_xchacha20poly1305_ietf_NPUBBYTES
+#define WRAPPED_DEK_BYTES    (CIPHER_KEY_BYTES + crypto_aead_xchacha20poly1305_ietf_ABYTES)
 
-#define WRAP_NONCE_OFFSET    AD_LEN                                        // 5
-#define WRAPPED_DEK_OFFSET   (WRAP_NONCE_OFFSET + WRAP_NONCE_BYTES)        // 29
-#define STREAM_HEADER_OFFSET (WRAPPED_DEK_OFFSET + WRAPPED_DEK_BYTES)      // 77
+#define WRAP_NONCE_OFFSET    AD_LEN
+#define WRAPPED_DEK_OFFSET   (WRAP_NONCE_OFFSET + WRAP_NONCE_BYTES)
+#define STREAM_HEADER_OFFSET (WRAPPED_DEK_OFFSET + WRAPPED_DEK_BYTES)
 
-static_assert(CIPHER_KEY_BYTES == crypto_secretstream_xchacha20poly1305_KEYBYTES,
-              "stream key size mismatch");
-static_assert(CIPHER_KEY_BYTES == crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
-              "AEAD KEK size mismatch");
-static_assert(CIPHER_CHUNK_SIZE == 128 * 1024, "the chunk size must be 128 KiB");
-static_assert(CIPHER_TAG_BYTES == crypto_secretstream_xchacha20poly1305_ABYTES,
-              "tag size mismatch");
+static_assert(CIPHER_KEY_BYTES == crypto_secretstream_xchacha20poly1305_KEYBYTES, "stream key size mismatch");
+static_assert(CIPHER_KEY_BYTES == crypto_aead_xchacha20poly1305_ietf_KEYBYTES, "AEAD KEK size mismatch");
+static_assert(CIPHER_CHUNK_SIZE == 128 * 1024, "chunk size must be 128 KiB");
+static_assert(CIPHER_TAG_BYTES == crypto_secretstream_xchacha20poly1305_ABYTES, "tag size mismatch");
 static_assert(CIPHER_HEADER_BYTES == STREAM_HEADER_OFFSET + crypto_secretstream_xchacha20poly1305_HEADERBYTES,
-              "header size mismatch (expected 101 bytes)");
+              "header size must be 101 bytes");
 
 struct CipherStream {
     crypto_secretstream_xchacha20poly1305_state state;
-    unsigned char ad[AD_LEN];  // magic + version, authenticated with every chunk
+    unsigned char ad[AD_LEN];
 };
+
+static CipherStream *stream_open(const unsigned char ad[AD_LEN], unsigned char dek[CIPHER_KEY_BYTES]) {
+    CipherStream *s = sodium_malloc(sizeof *s);
+    if (s == nullptr) return nullptr;
+    if (sodium_mlock(dek, CIPHER_KEY_BYTES) != 0) {
+        cipher_stream_free(s);
+        return nullptr;
+    }
+    memcpy(s->ad, ad, AD_LEN);
+    return s;
+}
+
+static void dek_wipe_unlock(unsigned char dek[CIPHER_KEY_BYTES]) {
+    sodium_memzero(dek, CIPHER_KEY_BYTES);
+    (void)sodium_munlock(dek, CIPHER_KEY_BYTES);
+}
 
 void cipher_stream_free(CipherStream *stream) {
     if (stream == nullptr) return;
-    sodium_memzero(stream, sizeof *stream);  // the state contains key material
+    sodium_memzero(stream, sizeof *stream);
     sodium_free(stream);
 }
 
@@ -44,53 +56,31 @@ CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     if (kek == nullptr || stream == nullptr || header == nullptr) return CIPHER_ERR_ARGS;
     if (sodium_init() < 0) return CIPHER_ERR_INIT;
 
-    // Allocate CipherStream in locked, guard-page-protected memory so stream key state cannot swap.
-    CipherStream *s = sodium_malloc(sizeof *s);
+    memcpy(header, MAGIC, MAGIC_LEN);
+    header[MAGIC_LEN] = (unsigned char)FORMAT_VERSION;
+
+    unsigned char dek[CIPHER_KEY_BYTES];
+    CipherStream *s = stream_open(header, dek);
     if (s == nullptr) return CIPHER_ERR_ALLOC;
 
-    memcpy(header, MAGIC, MAGIC_LEN);
-    header[VERSION_OFFSET] = (unsigned char)FORMAT_VERSION;
-    memcpy(s->ad, header, AD_LEN);
-
-    // 1. Generate a fresh 32-byte per-file DEK (locked in RAM) and a 24-byte wrap nonce.
-    unsigned char dek[CIPHER_KEY_BYTES];
-    if (sodium_mlock(dek, sizeof dek) != 0) {
-        cipher_stream_free(s);
-        return CIPHER_ERR_ALLOC;
-    }
+    CipherStatus status = CIPHER_ERR_ENCRYPT;
     randombytes_buf(dek, sizeof dek);
     randombytes_buf(header + WRAP_NONCE_OFFSET, WRAP_NONCE_BYTES);
 
-    // 2. Wrap the DEK under the KEK, binding the 5-byte prefix (magic + version) as AD.
     unsigned long long wrapped_len = 0;
-    const int wrap_rc = crypto_aead_xchacha20poly1305_ietf_encrypt(
-        header + WRAPPED_DEK_OFFSET, &wrapped_len,
-        dek, sizeof dek,
-        s->ad, AD_LEN,
-        nullptr,
-        header + WRAP_NONCE_OFFSET,
-        kek);
-
-    if (wrap_rc != 0 || wrapped_len != WRAPPED_DEK_BYTES) {
-        sodium_memzero(dek, sizeof dek);
-        (void)sodium_munlock(dek, sizeof dek);
-        cipher_stream_free(s);
-        return CIPHER_ERR_ENCRYPT;
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(header + WRAPPED_DEK_OFFSET, &wrapped_len,
+                                                   dek, sizeof dek, s->ad, AD_LEN,
+                                                   nullptr, header + WRAP_NONCE_OFFSET, kek) == 0 &&
+        wrapped_len == WRAPPED_DEK_BYTES &&
+        crypto_secretstream_xchacha20poly1305_init_push(&s->state, header + STREAM_HEADER_OFFSET, dek) == 0) {
+        *stream = s;
+        s = nullptr;
+        status = CIPHER_OK;
     }
 
-    // 3. Initialize secretstream with the per-file DEK (writes 24-byte stream header at offset 77).
-    const int init_rc = crypto_secretstream_xchacha20poly1305_init_push(
-        &s->state, header + STREAM_HEADER_OFFSET, dek);
-    sodium_memzero(dek, sizeof dek);
-    (void)sodium_munlock(dek, sizeof dek);
-
-    if (init_rc != 0) {
-        cipher_stream_free(s);
-        return CIPHER_ERR_ENCRYPT;
-    }
-
-    *stream = s;
-    return CIPHER_OK;
+    dek_wipe_unlock(dek);
+    cipher_stream_free(s);
+    return status;
 }
 
 CipherStatus cipher_encrypt_chunk(CipherStream *stream,
@@ -104,10 +94,11 @@ CipherStatus cipher_encrypt_chunk(CipherStream *stream,
     const unsigned char tag = last ? crypto_secretstream_xchacha20poly1305_TAG_FINAL
                                    : crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
     unsigned long long clen = 0;
-    const int rc = crypto_secretstream_xchacha20poly1305_push(
-        &stream->state, out, &clen, in, in_len, stream->ad, AD_LEN, tag);
-
-    if (rc != 0 || clen != in_len + CIPHER_TAG_BYTES) return CIPHER_ERR_ENCRYPT;
+    if (crypto_secretstream_xchacha20poly1305_push(&stream->state, out, &clen, in, in_len,
+                                                  stream->ad, AD_LEN, tag) != 0 ||
+        clen != in_len + CIPHER_TAG_BYTES) {
+        return CIPHER_ERR_ENCRYPT;
+    }
     *out_len = (size_t)clen;
     return CIPHER_OK;
 }
@@ -117,49 +108,31 @@ CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
                                   CipherStream **stream) {
     if (kek == nullptr || header == nullptr || stream == nullptr) return CIPHER_ERR_ARGS;
     if (sodium_init() < 0) return CIPHER_ERR_INIT;
-
     if (memcmp(header, MAGIC, MAGIC_LEN) != 0) return CIPHER_ERR_FORMAT;
-    if (header[VERSION_OFFSET] != FORMAT_VERSION) return CIPHER_ERR_VERSION;
+    if (header[MAGIC_LEN] != FORMAT_VERSION) return CIPHER_ERR_VERSION;
 
-    CipherStream *s = sodium_malloc(sizeof *s);
-    if (s == nullptr) return CIPHER_ERR_ALLOC;
-    memcpy(s->ad, header, AD_LEN);
-
-    // 1. Unwrap the per-file DEK using the KEK (locked in RAM) and verify its 16-byte Poly1305 tag.
     unsigned char dek[CIPHER_KEY_BYTES];
-    if (sodium_mlock(dek, sizeof dek) != 0) {
-        cipher_stream_free(s);
-        return CIPHER_ERR_ALLOC;
-    }
+    CipherStream *s = stream_open(header, dek);
+    if (s == nullptr) return CIPHER_ERR_ALLOC;
+
+    CipherStatus status = CIPHER_ERR_AUTH;
     unsigned long long dek_len = 0;
-    const int unwrap_rc = crypto_aead_xchacha20poly1305_ietf_decrypt(
-        dek, &dek_len,
-        nullptr,
-        header + WRAPPED_DEK_OFFSET, WRAPPED_DEK_BYTES,
-        s->ad, AD_LEN,
-        header + WRAP_NONCE_OFFSET,
-        kek);
-
-    if (unwrap_rc != 0 || dek_len != sizeof dek) {
-        sodium_memzero(dek, sizeof dek);
-        (void)sodium_munlock(dek, sizeof dek);
-        cipher_stream_free(s);
-        return CIPHER_ERR_AUTH;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(dek, &dek_len, nullptr,
+                                                   header + WRAPPED_DEK_OFFSET, WRAPPED_DEK_BYTES,
+                                                   s->ad, AD_LEN, header + WRAP_NONCE_OFFSET, kek) == 0 &&
+        dek_len == sizeof dek) {
+        if (crypto_secretstream_xchacha20poly1305_init_pull(&s->state, header + STREAM_HEADER_OFFSET, dek) == 0) {
+            *stream = s;
+            s = nullptr;
+            status = CIPHER_OK;
+        } else {
+            status = CIPHER_ERR_FORMAT;
+        }
     }
 
-    // 2. Initialize secretstream decryption with the unwrapped DEK.
-    const int init_rc = crypto_secretstream_xchacha20poly1305_init_pull(
-        &s->state, header + STREAM_HEADER_OFFSET, dek);
-    sodium_memzero(dek, sizeof dek);
-    (void)sodium_munlock(dek, sizeof dek);
-
-    if (init_rc != 0) {
-        cipher_stream_free(s);
-        return CIPHER_ERR_FORMAT;  // invalid stream header
-    }
-
-    *stream = s;
-    return CIPHER_OK;
+    dek_wipe_unlock(dek);
+    cipher_stream_free(s);
+    return status;
 }
 
 CipherStatus cipher_decrypt_chunk(CipherStream *stream,
@@ -169,7 +142,7 @@ CipherStatus cipher_decrypt_chunk(CipherStream *stream,
         return CIPHER_ERR_ARGS;
     }
     if (in_len > CIPHER_CHUNK_SIZE + CIPHER_TAG_BYTES) return CIPHER_ERR_ARGS;
-    if (in_len < CIPHER_TAG_BYTES) return CIPHER_ERR_AUTH;  // too short to be a chunk: file was cut
+    if (in_len < CIPHER_TAG_BYTES) return CIPHER_ERR_AUTH;
 
     unsigned long long mlen = 0;
     unsigned char tag = 0;
@@ -177,16 +150,12 @@ CipherStatus cipher_decrypt_chunk(CipherStream *stream,
                                                    in, in_len, stream->ad, AD_LEN) != 0) {
         return CIPHER_ERR_AUTH;
     }
-
-    // Only the two tags this program produces are acceptable.
-    if (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL) {
-        *last = true;
-    } else if (tag == crypto_secretstream_xchacha20poly1305_TAG_MESSAGE) {
-        *last = false;
-    } else {
+    if (tag != crypto_secretstream_xchacha20poly1305_TAG_FINAL &&
+        tag != crypto_secretstream_xchacha20poly1305_TAG_MESSAGE) {
         return CIPHER_ERR_AUTH;
     }
 
+    *last = (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL);
     *out_len = (size_t)mlen;
     return CIPHER_OK;
 }
@@ -203,16 +172,19 @@ void cipher_free(unsigned char *buf, size_t len) {
 }
 
 const char *cipher_strerror(CipherStatus status) {
-    switch (status) {
-        case CIPHER_OK:          return "ok";
-        case CIPHER_ERR_ARGS:    return "invalid arguments (internal error)";
-        case CIPHER_ERR_INIT:    return "cannot initialise libsodium";
-        case CIPHER_ERR_ALLOC:   return "out of memory";
-        case CIPHER_ERR_TOO_BIG: return "chunk too large (internal error)";
-        case CIPHER_ERR_ENCRYPT: return "encryption failed";
-        case CIPHER_ERR_FORMAT:  return "not a valid sfm encrypted file";
-        case CIPHER_ERR_VERSION: return "unsupported file format version";
-        case CIPHER_ERR_AUTH:    return "wrong key, or the file was modified, corrupted or truncated";
+    static const char *const messages[] = {
+        [CIPHER_OK]          = "ok",
+        [CIPHER_ERR_ARGS]    = "invalid arguments (internal error)",
+        [CIPHER_ERR_INIT]    = "cannot initialise libsodium",
+        [CIPHER_ERR_ALLOC]   = "out of memory",
+        [CIPHER_ERR_TOO_BIG] = "chunk too large (internal error)",
+        [CIPHER_ERR_ENCRYPT] = "encryption failed",
+        [CIPHER_ERR_FORMAT]  = "not a valid sfm encrypted file",
+        [CIPHER_ERR_VERSION] = "unsupported file format version",
+        [CIPHER_ERR_AUTH]    = "wrong key, or the file was modified, corrupted or truncated",
+    };
+    if ((unsigned)status < sizeof messages / sizeof messages[0] && messages[status] != nullptr) {
+        return messages[status];
     }
     return "unknown error";
 }

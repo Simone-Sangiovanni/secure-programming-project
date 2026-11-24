@@ -13,16 +13,10 @@
 #define ENCRYPTED_EXT     ".sfm"
 #define ENCRYPTED_EXT_LEN (sizeof ENCRYPTED_EXT - 1)
 
-/* ---------- helpers (private to this file) ---------- */
+/* ---------- private helpers ---------- */
 
-static void print_failure(const char *cmd_name, const char *in_path, const char *out_path,
-                          FileCryptResult result) {
-    if (result.io != FILEIO_OK) {
-        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name,
-                      result.io_on_output ? out_path : in_path, fileio_strerror(result.io));
-    } else {
-        (void)fprintf(stderr, "%s: '%s': %s\n", cmd_name, in_path, cipher_strerror(result.cipher));
-    }
+static bool has_valid_ctx(const CommandContext *ctx, bool need_key) {
+    return ctx != nullptr && ctx->cfg != nullptr && (!need_key || ctx->key != nullptr);
 }
 
 static bool has_encrypted_extension(const char *name) {
@@ -31,10 +25,43 @@ static bool has_encrypted_extension(const char *name) {
            strcmp(name + len - ENCRYPTED_EXT_LEN, ENCRYPTED_EXT) == 0;
 }
 
+static bool build_vault_path(char out[static VALIDATE_PATH_MAX],
+                             const char *vault_path, const char *name, const char *ext) {
+    const int n = snprintf(out, VALIDATE_PATH_MAX, "%s/%s%s", vault_path, name, ext);
+    return n >= 0 && (size_t)n < VALIDATE_PATH_MAX;
+}
+
+static bool build_decrypted_path(char out[static VALIDATE_PATH_MAX],
+                                 const char *dir, const char *vault_file) {
+    size_t dir_len = strlen(dir);
+    while (dir_len > 1 && dir[dir_len - 1] == '/') dir_len--;
+
+    const size_t stem_len = strlen(vault_file) - ENCRYPTED_EXT_LEN;
+    const int n = snprintf(out, VALIDATE_PATH_MAX, "%.*s/%.*s",
+                           (int)dir_len, dir, (int)stem_len, vault_file);
+    return n >= 0 && (size_t)n < VALIDATE_PATH_MAX;
+}
+
+static CommandStatus fail_cmd(const SfmConfig *cfg, LogEvent event,
+                              const char *target, const char *cmd, const char *msg) {
+    (void)fprintf(stderr, "%s: %s\n", cmd, msg);
+    log_audit_event(cfg, event, LOG_OUTCOME_FAILURE, target);
+    return CMD_ERR_FAILED;
+}
+
+static void print_crypt_failure(const char *cmd, const char *in_path,
+                                const char *out_path, FileCryptResult result) {
+    const bool on_out = (result.io != FILEIO_OK && result.io_on_output);
+    const char *err = (result.io != FILEIO_OK)
+                      ? fileio_strerror(result.io)
+                      : cipher_strerror(result.cipher);
+    (void)fprintf(stderr, "%s: '%s': %s\n", cmd, on_out ? out_path : in_path, err);
+}
+
 static void print_sanitized_name(const char *name) {
-    for (size_t i = 0; name[i] != '\0'; i++) {
-        const unsigned char c = (unsigned char)name[i];
-        (void)putchar(iscntrl(c) ? '?' : (int)c);
+    for (const char *p = name; *p != '\0'; p++) {
+        const unsigned char c = (unsigned char)*p;
+        (void)putchar(iscntrl(c) ? '?' : c);
     }
     (void)putchar('\n');
 }
@@ -43,21 +70,16 @@ static void print_sanitized_name(const char *name) {
 
 CommandStatus cmd_list(const CommandContext *ctx,
                        [[maybe_unused]] int argc, [[maybe_unused]] char *argv[]) {
-    if (ctx == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
+    if (!has_valid_ctx(ctx, false)) return CMD_ERR_FAILED;
 
     DIR *dir = opendir(ctx->cfg->vault_path);
     if (dir == nullptr) {
-        (void)fprintf(stderr, "list: cannot open vault directory\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_LIST_FILES, LOG_OUTCOME_FAILURE, nullptr);
-        return CMD_ERR_FAILED;
+        return fail_cmd(ctx->cfg, LOG_EVENT_LIST_FILES, nullptr,
+                        "list", "cannot open vault directory");
     }
 
     size_t count = 0;
-    const struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
+    for (const struct dirent *entry; (entry = readdir(dir)) != nullptr;) {
         if (has_encrypted_extension(entry->d_name)) {
             print_sanitized_name(entry->d_name);
             count++;
@@ -74,37 +96,29 @@ CommandStatus cmd_list(const CommandContext *ctx,
 }
 
 CommandStatus cmd_encrypt(const CommandContext *ctx, [[maybe_unused]] int argc, char *argv[]) {
-    if (ctx == nullptr || ctx->key == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
+    if (!has_valid_ctx(ctx, true)) return CMD_ERR_FAILED;
     const char *requested_path = argv[0];
 
-    // 1. Validate the path text and canonicalize its parent directory.
-    //    The file itself is not resolved: it is opened with O_NOFOLLOW later.
+    // Validate path text and canonicalize parent directory (file opened with O_NOFOLLOW later).
     char in_path[VALIDATE_PATH_MAX];
     const ValidateStatus vs = validate_file_path(requested_path, in_path);
     if (vs != VALIDATE_OK) {
-        (void)fprintf(stderr, "encrypt: %s\n", validate_strerror(vs));
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_FAILURE, requested_path);
-        return CMD_ERR_FAILED;
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, requested_path,
+                        "encrypt", validate_strerror(vs));
     }
 
-    // 2. Extract the base file name to place it inside the vault
     const char *slash = strrchr(in_path, '/');
     const char *basename = (slash != nullptr) ? slash + 1 : in_path;
 
-    // 3. Construct the output path inside the vault securely
     char out_path[VALIDATE_PATH_MAX];
-    const int n = snprintf(out_path, sizeof out_path, "%s/%s%s",
-                           ctx->cfg->vault_path, basename, ENCRYPTED_EXT);
-    if (n < 0 || (size_t)n >= sizeof out_path) {
-        (void)fprintf(stderr, "encrypt: the output file name would be too long\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_FAILURE, basename);
-        return CMD_ERR_FAILED;
+    if (!build_vault_path(out_path, ctx->cfg->vault_path, basename, ENCRYPTED_EXT)) {
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, basename,
+                        "encrypt", "the output file name would be too long");
     }
 
-    // 4. Stream the file through the cipher
     const FileCryptResult result = filecrypt_encrypt(ctx->key, in_path, out_path);
     if (!filecrypt_ok(result)) {
-        print_failure("encrypt", in_path, out_path, result);
+        print_crypt_failure("encrypt", in_path, out_path, result);
         log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_FAILURE, basename);
         return CMD_ERR_FAILED;
     }
@@ -112,73 +126,56 @@ CommandStatus cmd_encrypt(const CommandContext *ctx, [[maybe_unused]] int argc, 
     printf("Encrypted: '%s' -> '%s'\n", in_path, out_path);
     log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_SUCCESS, basename);
 
-    // 5. Securely remove the original plaintext source file
+    // Securely delete the plaintext source file; warn on failure without failing encryption.
     const FileIoStatus del_status = fileio_secure_delete(in_path);
-    if (del_status != FILEIO_OK) {
+    const bool deleted = (del_status == FILEIO_OK);
+    if (!deleted) {
         (void)fprintf(stderr,
                       "encrypt: warning: encrypted file saved, but could not securely delete source '%s': %s\n",
                       in_path, fileio_strerror(del_status));
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, basename);
-    } else {
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_SUCCESS, basename);
     }
+    log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE,
+                    deleted ? LOG_OUTCOME_SUCCESS : LOG_OUTCOME_FAILURE, basename);
 
     return CMD_OK;
 }
 
 CommandStatus cmd_decrypt(const CommandContext *ctx, [[maybe_unused]] int argc, char *argv[]) {
-    if (ctx == nullptr || ctx->key == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
+    if (!has_valid_ctx(ctx, true)) return CMD_ERR_FAILED;
     const char *vault_file = argv[0];
     const char *out_dir = argv[1];
 
-    // 1. Validate and canonicalize destination directory path
     char resolved_dir[VALIDATE_PATH_MAX];
     const ValidateStatus vs = validate_directory_path(out_dir, resolved_dir);
     if (vs != VALIDATE_OK) {
-        (void)fprintf(stderr, "decrypt: %s\n", validate_strerror(vs));
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DECRYPT, vault_file,
+                        "decrypt", validate_strerror(vs));
     }
 
-    // 2. Ensure the vault file is a plain filename (no '/') ending in ".sfm"
     if (strchr(vault_file, '/') != nullptr) {
-        (void)fprintf(stderr, "decrypt: vault file name must not contain '/'\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DECRYPT, vault_file,
+                        "decrypt", "vault file name must not contain '/'");
     }
     if (!has_encrypted_extension(vault_file)) {
-        (void)fprintf(stderr, "decrypt: only files ending in '" ENCRYPTED_EXT "' can be decrypted\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DECRYPT, vault_file,
+                        "decrypt", "only files ending in '" ENCRYPTED_EXT "' can be decrypted");
     }
 
-    // 3. Construct the input path inside the vault
     char in_path[VALIDATE_PATH_MAX];
-    int n = snprintf(in_path, sizeof in_path, "%s/%s", ctx->cfg->vault_path, vault_file);
-    if (n < 0 || (size_t)n >= sizeof in_path) {
-        (void)fprintf(stderr, "decrypt: the input file name would be too long\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+    if (!build_vault_path(in_path, ctx->cfg->vault_path, vault_file, "")) {
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DECRYPT, vault_file,
+                        "decrypt", "the input file name would be too long");
     }
-
-    // 4. Construct the output path inside the canonical destination directory
-    const size_t name_len = strlen(vault_file);
-    size_t dir_len = strlen(resolved_dir);
-    while (dir_len > 1 && resolved_dir[dir_len - 1] == '/') dir_len--;
 
     char out_path[VALIDATE_PATH_MAX];
-    n = snprintf(out_path, sizeof out_path, "%.*s/%.*s",
-                 (int)dir_len, resolved_dir, (int)(name_len - ENCRYPTED_EXT_LEN), vault_file);
-    if (n < 0 || (size_t)n >= sizeof out_path) {
-        (void)fprintf(stderr, "decrypt: the output file name would be too long\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+    if (!build_decrypted_path(out_path, resolved_dir, vault_file)) {
+        return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DECRYPT, vault_file,
+                        "decrypt", "the output file name would be too long");
     }
 
-    // 5. Stream the file through the cipher
     const FileCryptResult result = filecrypt_decrypt(ctx->key, in_path, out_path);
     if (!filecrypt_ok(result)) {
-        print_failure("decrypt", in_path, out_path, result);
+        print_crypt_failure("decrypt", in_path, out_path, result);
         log_audit_event(ctx->cfg, LOG_EVENT_FILE_DECRYPT, LOG_OUTCOME_FAILURE, vault_file);
         return CMD_ERR_FAILED;
     }
@@ -189,33 +186,25 @@ CommandStatus cmd_decrypt(const CommandContext *ctx, [[maybe_unused]] int argc, 
 }
 
 CommandStatus cmd_secure_delete(const CommandContext *ctx, [[maybe_unused]] int argc, char *argv[]) {
-    if (ctx == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
+    if (!has_valid_ctx(ctx, false)) return CMD_ERR_FAILED;
     const char *arg = argv[0];
     char target_path[VALIDATE_PATH_MAX];
 
     if (strchr(arg, '/') == nullptr) {
-        // A plain name: a file of the vault.
         if (!has_encrypted_extension(arg)) {
-            (void)fprintf(stderr,
-                          "secure_delete: a vault file name must end in '" ENCRYPTED_EXT
-                          "' (use an absolute path to delete other files)\n");
-            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
-            return CMD_ERR_FAILED;
+            return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DELETE, arg, "secure_delete",
+                            "a vault file name must end in '" ENCRYPTED_EXT
+                            "' (use an absolute path to delete other files)");
         }
-        const int n = snprintf(target_path, sizeof target_path, "%s/%s", ctx->cfg->vault_path, arg);
-        if (n < 0 || (size_t)n >= sizeof target_path) {
-            (void)fprintf(stderr, "secure_delete: the file path is too long\n");
-            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
-            return CMD_ERR_FAILED;
+        if (!build_vault_path(target_path, ctx->cfg->vault_path, arg, "")) {
+            return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DELETE, arg,
+                            "secure_delete", "the file path is too long");
         }
     } else {
-        // A path: any file of the user, inside or outside the vault. The directory part is
-        // canonicalized; the file itself is opened with O_NOFOLLOW and its owner is verified.
         const ValidateStatus vs = validate_file_path(arg, target_path);
         if (vs != VALIDATE_OK) {
-            (void)fprintf(stderr, "secure_delete: %s\n", validate_strerror(vs));
-            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
-            return CMD_ERR_FAILED;
+            return fail_cmd(ctx->cfg, LOG_EVENT_FILE_DELETE, arg,
+                            "secure_delete", validate_strerror(vs));
         }
     }
 

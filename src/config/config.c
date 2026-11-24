@@ -7,73 +7,105 @@
 #include <string.h>
 #include <unistd.h>
 
-#define CONFIG_MAX_FILE_SIZE (64L * 1024L)  // 64 KiB - max config file size allowed
+#define CONFIG_MAX_FILE_SIZE (64L * 1024L)
 #define CONFIG_DEFAULT_KDF   "argon2id"
 
-/* ---------- helpers (private to this file) ---------- */
+/* ---------- internal helpers ---------- */
 
 static bool copy_str(char *dst, size_t dst_size, const char *src) {
     const int n = snprintf(dst, dst_size, "%s", src);
     return n >= 0 && (size_t)n < dst_size;
 }
 
-static bool copy_json_field(char *dst, size_t dst_size, const cJSON *item) {
+static bool read_json_str(const cJSON *json, const char *key, char *dst, size_t dst_size) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(json, key);
     return copy_str(dst, dst_size, cJSON_IsString(item) ? item->valuestring : "");
 }
 
-static bool has_traversal_component(const char *path, size_t len) {
-    return strstr(path, "/../") != nullptr ||
-           strstr(path, "/./") != nullptr ||
-           (len >= 3 && strcmp(path + len - 3, "/..") == 0) ||
-           (len >= 2 && strcmp(path + len - 2, "/.") == 0);
-}
-
-static bool is_valid_configured_path(const char *path, bool allow_trailing_slash) {
+static bool is_valid_path(const char *path, bool allow_trailing_slash) {
     if (path == nullptr || path[0] != '/') return false;
     const size_t len = strlen(path);
-    if (len == 0 || has_traversal_component(path, len)) return false;
     if (!allow_trailing_slash && path[len - 1] == '/') return false;
-    return true;
+
+    return strstr(path, "/../") == nullptr &&
+           strstr(path, "/./") == nullptr &&
+           !(len >= 3 && strcmp(path + len - 3, "/..") == 0) &&
+           !(len >= 2 && strcmp(path + len - 2, "/.") == 0);
 }
 
 static void strip_trailing_slashes(char *path) {
-    size_t len = strlen(path);
-    while (len > 1 && path[len - 1] == '/') {
-        path[--len] = '\0';
+    for (size_t len = strlen(path); len > 1 && path[len - 1] == '/'; len--) {
+        path[len - 1] = '\0';
     }
 }
 
 static ConfigStatus read_file(const char *path, char **out, size_t *out_len) {
     FILE *f = fopen(path, "rb");
-    if (f == nullptr) {
-        return (errno == ENOENT) ? CONFIG_ERR_NOT_FOUND : CONFIG_ERR_IO;
+    if (f == nullptr) return (errno == ENOENT) ? CONFIG_ERR_NOT_FOUND : CONFIG_ERR_IO;
+
+    ConfigStatus status = CONFIG_ERR_IO;
+    char *buf = nullptr;
+
+    if (fseek(f, 0, SEEK_END) == 0) {
+        const long size = ftell(f);
+        if (size > CONFIG_MAX_FILE_SIZE) {
+            status = CONFIG_ERR_INVALID;
+        } else if (size >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            buf = malloc((size_t)size + 1);
+            if (buf != nullptr && fread(buf, 1, (size_t)size, f) == (size_t)size) {
+                buf[size] = '\0';
+                *out = buf;
+                *out_len = (size_t)size;
+                buf = nullptr;
+                status = CONFIG_OK;
+            }
+        }
     }
-    if (fseek(f, 0, SEEK_END) != 0) { (void)fclose(f); return CONFIG_ERR_IO; }
-    const long size = ftell(f);
-    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
-        (void)fclose(f);
+
+    free(buf);
+    (void)fclose(f);
+    return status;
+}
+
+static ConfigStatus write_atomic(const char *file_path, const char *text) {
+    const char *slash = strrchr(file_path, '/');
+    const int dir_len = (slash != nullptr) ? (int)(slash - file_path + 1) : 0;
+
+    char tmp_path[4096 + 32];
+    const int n = snprintf(tmp_path, sizeof tmp_path, "%.*s.sfm-tmp-XXXXXX", dir_len, file_path);
+    if (n < 0 || (size_t)n >= sizeof tmp_path) return CONFIG_ERR_IO;
+
+    const int fd = mkstemp(tmp_path);
+    if (fd < 0) return CONFIG_ERR_IO;
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+    const size_t len = strlen(text);
+    bool ok = true;
+    for (size_t done = 0; done < len;) {
+        const ssize_t w = write(fd, text + done, len - done);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+        done += (size_t)w;
+    }
+
+    if (ok && fsync(fd) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    if (ok && rename(tmp_path, file_path) != 0) ok = false;
+
+    if (!ok) {
+        (void)unlink(tmp_path);
         return CONFIG_ERR_IO;
     }
-    if (size > CONFIG_MAX_FILE_SIZE) { (void)fclose(f); return CONFIG_ERR_INVALID; }
-
-    char *buf = malloc((size_t)size + 1);
-    if (buf == nullptr) { (void)fclose(f); return CONFIG_ERR_IO; }
-
-    const size_t got = fread(buf, 1, (size_t)size, f);
-    (void)fclose(f);
-    if (got != (size_t)size) { free(buf); return CONFIG_ERR_IO; }
-
-    buf[size] = '\0';
-    *out = buf;
-    *out_len = (size_t)size;
     return CONFIG_OK;
 }
 
-/* ---------- public API (full contract documented in config.h) ---------- */
+/* ---------- public API ---------- */
 
 bool config_is_first_run(const SfmConfig *cfg) {
-    if (cfg == nullptr) return true;
-    return cfg->salt[0] == '\0' || cfg->verifier[0] == '\0';
+    return cfg == nullptr || cfg->salt[0] == '\0' || cfg->verifier[0] == '\0';
 }
 
 ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
@@ -81,13 +113,15 @@ ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
     if (cfg == nullptr || config_path == nullptr || vault_path == nullptr || log_path == nullptr) {
         return CONFIG_ERR_ARGS;
     }
-    SfmConfig tmp = {};  // C23: zero-initialises every field
+
+    SfmConfig tmp = {};
     if (!copy_str(tmp.kdf, sizeof tmp.kdf, CONFIG_DEFAULT_KDF) ||
         !copy_str(tmp.vault_path, sizeof tmp.vault_path, vault_path) ||
         !copy_str(tmp.log_path, sizeof tmp.log_path, log_path) ||
         !copy_str(tmp.config_path, sizeof tmp.config_path, config_path)) {
         return CONFIG_ERR_INVALID;
     }
+
     strip_trailing_slashes(tmp.vault_path);
     *cfg = tmp;
     return CONFIG_OK;
@@ -105,47 +139,31 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
     free(data);
     if (json == nullptr) return CONFIG_ERR_PARSE;
 
-    // Fill a temporary struct so cfg is never left half-written.
     SfmConfig tmp = {};
     const bool ok =
-        copy_json_field(tmp.kdf, sizeof tmp.kdf,
-                        cJSON_GetObjectItemCaseSensitive(json, "kdf")) &&
-        copy_json_field(tmp.salt, sizeof tmp.salt,
-                        cJSON_GetObjectItemCaseSensitive(json, "salt")) &&
-        copy_json_field(tmp.verifier, sizeof tmp.verifier,
-                        cJSON_GetObjectItemCaseSensitive(json, "verifier")) &&
-        copy_json_field(tmp.vault_path, sizeof tmp.vault_path,
-                        cJSON_GetObjectItemCaseSensitive(json, "vault")) &&
-        copy_json_field(tmp.log_path, sizeof tmp.log_path,
-                        cJSON_GetObjectItemCaseSensitive(json, "log")) &&
-        copy_json_field(tmp.config_path, sizeof tmp.config_path,
-                        cJSON_GetObjectItemCaseSensitive(json, "config"));
-
+        read_json_str(json, "kdf",      tmp.kdf,         sizeof tmp.kdf) &&
+        read_json_str(json, "salt",     tmp.salt,        sizeof tmp.salt) &&
+        read_json_str(json, "verifier", tmp.verifier,    sizeof tmp.verifier) &&
+        read_json_str(json, "vault",    tmp.vault_path,  sizeof tmp.vault_path) &&
+        read_json_str(json, "log",      tmp.log_path,    sizeof tmp.log_path) &&
+        read_json_str(json, "config",   tmp.config_path, sizeof tmp.config_path);
     cJSON_Delete(json);
     if (!ok) return CONFIG_ERR_INVALID;
 
-    // If "config" was omitted in JSON, default to file_path; otherwise verify consistency.
     if (tmp.config_path[0] == '\0') {
-        if (!copy_str(tmp.config_path, sizeof tmp.config_path, file_path)) {
-            return CONFIG_ERR_INVALID;
-        }
+        if (!copy_str(tmp.config_path, sizeof tmp.config_path, file_path)) return CONFIG_ERR_INVALID;
     } else if (strcmp(tmp.config_path, file_path) != 0) {
         return CONFIG_ERR_INVALID;
     }
 
-    if (!is_valid_configured_path(tmp.vault_path, true) ||
-        !is_valid_configured_path(tmp.log_path, false) ||
-        !is_valid_configured_path(tmp.config_path, false)) {
+    if (!is_valid_path(tmp.vault_path, true) ||
+        !is_valid_path(tmp.log_path, false) ||
+        !is_valid_path(tmp.config_path, false)) {
         return CONFIG_ERR_INVALID;
     }
     strip_trailing_slashes(tmp.vault_path);
 
-    // Reject a partially populated credential state (salt without verifier or vice versa).
-    const bool has_salt = (tmp.salt[0] != '\0');
-    const bool has_verifier = (tmp.verifier[0] != '\0');
-    if (has_salt != has_verifier) {
-        return CONFIG_ERR_PARSE;
-    }
+    if ((tmp.salt[0] != '\0') != (tmp.verifier[0] != '\0')) return CONFIG_ERR_PARSE;
 
     *cfg = tmp;
     return CONFIG_OK;
@@ -154,55 +172,25 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
 ConfigStatus save_config(const char *file_path, const SfmConfig *cfg) {
     if (file_path == nullptr || cfg == nullptr) return CONFIG_ERR_ARGS;
 
-    const char *effective_config_path =
-        (cfg->config_path[0] != '\0') ? cfg->config_path : file_path;
-
+    const char *cfg_path = (cfg->config_path[0] != '\0') ? cfg->config_path : file_path;
     cJSON *json = cJSON_CreateObject();
     if (json == nullptr) return CONFIG_ERR_IO;
+
     if (!cJSON_AddStringToObject(json, "kdf", cfg->kdf) ||
         !cJSON_AddStringToObject(json, "salt", cfg->salt) ||
         !cJSON_AddStringToObject(json, "verifier", cfg->verifier) ||
         !cJSON_AddStringToObject(json, "vault", cfg->vault_path) ||
         !cJSON_AddStringToObject(json, "log", cfg->log_path) ||
-        !cJSON_AddStringToObject(json, "config", effective_config_path)) {
+        !cJSON_AddStringToObject(json, "config", cfg_path)) {
         cJSON_Delete(json);
         return CONFIG_ERR_IO;
     }
+
     char *text = cJSON_Print(json);
     cJSON_Delete(json);
     if (text == nullptr) return CONFIG_ERR_IO;
 
-    const char *slash = strrchr(file_path, '/');
-    const int dir_len = (slash != nullptr) ? (int)(slash - file_path + 1) : 0;
-    char tmp_path[4096 + 32];
-    const int n = snprintf(tmp_path, sizeof tmp_path, "%.*s.sfm-tmp-XXXXXX", dir_len, file_path);
-    if (n < 0 || (size_t)n >= sizeof tmp_path) { free(text); return CONFIG_ERR_IO; }
-
-    const int fd = mkstemp(tmp_path);
-    if (fd < 0) { free(text); return CONFIG_ERR_IO; }
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-    const size_t len = strlen(text);
-    bool ok = true;
-    size_t done = 0;
-    while (done < len) {
-        const ssize_t w = write(fd, text + done, len - done);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            ok = false;
-            break;
-        }
-        done += (size_t)w;
-    }
+    const ConfigStatus status = write_atomic(file_path, text);
     free(text);
-
-    if (ok && fsync(fd) != 0) ok = false;
-    if (close(fd) != 0) ok = false;
-    if (ok && rename(tmp_path, file_path) != 0) ok = false;
-
-    if (!ok) {
-        (void)unlink(tmp_path);
-        return CONFIG_ERR_IO;
-    }
-    return CONFIG_OK;
+    return status;
 }

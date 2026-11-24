@@ -6,143 +6,66 @@
 
 /**
  * @file cipher.h
- * @brief Authenticated, chunk-by-chunk encryption (libsodium secretstream,
- *        XChaCha20-Poly1305) with per-file Data-Encryption Keys (DEKs).
+ * @brief Chunked authenticated encryption (XChaCha20-Poly1305 secretstream)
+ *        with per-file Data-Encryption Keys (DEKs).
  *
- * A file is encrypted as a sequence of independent-size chunks so memory use
- * stays constant (about 2 chunks) whatever the file size. Every chunk is
- * authenticated, and the stream as a whole is protected against reordering,
- * duplication, removal and truncation: the last chunk carries a special
- * FINAL mark that a decryptor insists on seeing.
+ * File layout (version 3, 101-byte header):
+ *   "SFM1" (4) | version=3 (1) | wrap_nonce (24) | wrapped_dek (48) | stream_header (24) | chunks...
  *
- * Encrypted file layout (format version 3, 101-byte header):
- *
- *   | "SFM1" (4) | version=3 (1) | wrap_nonce (24) | wrapped_dek (32 + 16) | stream_header (24) | chunk 1 | ... | last chunk |
- *
- * where:
- *   - Every file generates a fresh random 32-byte DEK.
- *   - The DEK is wrapped (authenticated + encrypted) under the caller's KEK
- *     using crypto_aead_xchacha20poly1305_ietf_encrypt() with the 5-byte
- *     prefix ("SFM1" || version=3) bound as associated data.
- *   - The secretstream is initialized with the unwrapped 32-byte DEK, and
- *     the same 5-byte prefix is authenticated with every chunk.
- *   - Every chunk is ciphertext (up to 128 KiB) + 17-byte tag. All chunks hold
- *     exactly CIPHER_CHUNK_SIZE bytes of plaintext except the last one, which
- *     holds between 0 and CIPHER_CHUNK_SIZE (0 only for an empty file).
- *
- * This module only transforms memory buffers; it never touches files.
+ * The 5-byte prefix ("SFM1" || 3) is bound as associated data to both the
+ * wrapped DEK and every chunk. Each chunk holds up to CIPHER_CHUNK_SIZE
+ * plaintext bytes followed by a CIPHER_TAG_BYTES authentication tag.
  */
 
-/**
- * Plaintext bytes per chunk: 128 KiB = 131072.
- *
- * Written as a plain literal on purpose: an expression like (128U * 1024U)
- * is a multiplication done in 32-bit unsigned int, and every place that
- * uses the macro in a 64-bit context (size_t, uint64_t) would trigger
- * clang-tidy's bugprone-implicit-widening-of-multiplication-result.
- * cipher.c has a static_assert that checks the value.
- */
-#define CIPHER_CHUNK_SIZE 131072U
+#define CIPHER_CHUNK_SIZE   131072U  /**< 128 KiB plaintext per chunk (plain literal avoids widening warnings). */
+#define CIPHER_TAG_BYTES    17U      /**< Per-chunk authentication tag size. */
+#define CIPHER_HEADER_BYTES 101U     /**< Encrypted file header size. */
+#define CIPHER_KEY_BYTES    32       /**< KEK and per-file DEK size in bytes. */
 
-/** Authentication tag added to every chunk. */
-#define CIPHER_TAG_BYTES 17U
-
-/** Size of the encrypted-file header (4 magic + 1 ver + 24 wrap_nonce + 48 wrapped_dek + 24 stream_header). */
-#define CIPHER_HEADER_BYTES 101U
-
-/** Size in bytes of the Key-Encryption Key (KEK) and per-file DEK (same as AUTH_KEY_BYTES). */
-#define CIPHER_KEY_BYTES 32
-
-/** Result codes returned by the cipher functions. */
 typedef enum {
     CIPHER_OK = 0,        /**< Success. */
-    CIPHER_ERR_ARGS,      /**< NULL pointer or bad size passed by the caller (a bug). */
-    CIPHER_ERR_INIT,      /**< libsodium could not be initialised. */
-    CIPHER_ERR_ALLOC,     /**< Out of memory. */
-    CIPHER_ERR_TOO_BIG,   /**< Chunk larger than CIPHER_CHUNK_SIZE. */
-    CIPHER_ERR_ENCRYPT,   /**< Encryption failed. */
-    CIPHER_ERR_FORMAT,    /**< Not an sfm-encrypted file (bad magic / header). */
-    CIPHER_ERR_VERSION,   /**< Encrypted by an unsupported format version. */
-    CIPHER_ERR_AUTH       /**< Wrong key, or the data was modified/corrupted/truncated. */
+    CIPHER_ERR_ARGS,      /**< NULL pointer or invalid buffer size. */
+    CIPHER_ERR_INIT,      /**< libsodium initialization failed. */
+    CIPHER_ERR_ALLOC,     /**< Memory allocation or mlock failed. */
+    CIPHER_ERR_TOO_BIG,   /**< Plaintext chunk exceeds CIPHER_CHUNK_SIZE. */
+    CIPHER_ERR_ENCRYPT,   /**< Encryption operation failed. */
+    CIPHER_ERR_FORMAT,    /**< Invalid file magic or stream header. */
+    CIPHER_ERR_VERSION,   /**< Unsupported file format version. */
+    CIPHER_ERR_AUTH       /**< Wrong key, or data modified/corrupted/truncated. */
 } CipherStatus;
 
-/** State of an encryption or decryption in progress (opaque). */
 typedef struct CipherStream CipherStream;
 
-/**
- * @brief Starts encrypting a new file with a fresh per-file DEK wrapped by @p kek.
- *
- * @param kek    CIPHER_KEY_BYTES-byte Key-Encryption Key.
- * @param stream Receives the state. Release it with cipher_stream_free().
- * @param header Receives CIPHER_HEADER_BYTES bytes that must be written at
- *               the very beginning of the encrypted file.
- */
+/** Begins encrypting a file with a fresh per-file DEK wrapped under @p kek. */
 [[nodiscard]] CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 CipherStream **stream,
                                                 unsigned char header[CIPHER_HEADER_BYTES]);
 
-/**
- * @brief Encrypts the next chunk.
- *
- * @param stream  State from cipher_encrypt_begin().
- * @param in      Plaintext chunk (may be NULL only if @p in_len is 0).
- * @param in_len  At most CIPHER_CHUNK_SIZE. Must equal CIPHER_CHUNK_SIZE for
- *                every chunk except the last.
- * @param last    true for the final chunk of the file.
- * @param out     Output buffer of at least in_len + CIPHER_TAG_BYTES bytes.
- * @param out_len Receives in_len + CIPHER_TAG_BYTES.
- */
+/** Encrypts the next chunk (set @p last to true on the final chunk). */
 [[nodiscard]] CipherStatus cipher_encrypt_chunk(CipherStream *stream,
                                                 const unsigned char *in, size_t in_len, bool last,
                                                 unsigned char *out, size_t *out_len);
 
-/**
- * @brief Starts decrypting by unwrapping the per-file DEK with @p kek.
- *
- * @param kek    CIPHER_KEY_BYTES-byte Key-Encryption Key.
- * @param header The first CIPHER_HEADER_BYTES bytes of the encrypted file.
- * @param stream Receives the state. Release it with cipher_stream_free().
- * @return CIPHER_OK, CIPHER_ERR_FORMAT, CIPHER_ERR_VERSION, or CIPHER_ERR_AUTH
- *         if the KEK is wrong or the wrapped DEK was tampered with.
- */
+/** Begins decrypting a file by validating @p header and unwrapping its DEK with @p kek. */
 [[nodiscard]] CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
                                                 const unsigned char header[CIPHER_HEADER_BYTES],
                                                 CipherStream **stream);
 
-/**
- * @brief Decrypts the next chunk and verifies it.
- *
- * Nothing is returned for a chunk that fails verification. After a failure
- * the stream must be abandoned.
- *
- * @param stream  State from cipher_decrypt_begin().
- * @param in      Encrypted chunk, as read from the file.
- * @param in_len  Between CIPHER_TAG_BYTES and CIPHER_CHUNK_SIZE + CIPHER_TAG_BYTES.
- * @param out     Output buffer of at least CIPHER_CHUNK_SIZE bytes.
- * @param out_len Receives the plaintext length.
- * @param last    Receives true if this was the final chunk.
- * @return CIPHER_OK, or CIPHER_ERR_AUTH for a wrong key, modified, reordered
- *         or truncated data.
- */
+/** Decrypts and verifies the next chunk; sets @p last on the final chunk. */
 [[nodiscard]] CipherStatus cipher_decrypt_chunk(CipherStream *stream,
                                                 const unsigned char *in, size_t in_len,
                                                 unsigned char *out, size_t *out_len, bool *last);
 
-/** Wipes and frees a stream state. Safe to call with NULL. */
+/** Zeroes and frees a stream state (safe with NULL). */
 void cipher_stream_free(CipherStream *stream);
 
-/**
- * @brief Returns the exact size of the encrypted file for a given plaintext size.
- *
- * Header + plaintext + one 17-byte tag per chunk. An empty file still has one
- * (empty) chunk. Valid for sizes up to FILEIO_MAX_SIZE.
- */
+/** Returns the exact encrypted byte size for a plaintext of @p plain_size bytes. */
 [[nodiscard]] uint64_t cipher_encrypted_size(uint64_t plain_size);
 
-/** Wipes a buffer with zeros and frees it. Safe to call with NULL. */
+/** Zeroes @p len bytes of @p buf and frees it (safe with NULL). */
 void cipher_free(unsigned char *buf, size_t len);
 
-/** Returns a human-readable message for a CipherStatus (never NULL). */
+/** Returns a human-readable description for @p status (never NULL). */
 [[nodiscard]] const char *cipher_strerror(CipherStatus status);
 
 #endif

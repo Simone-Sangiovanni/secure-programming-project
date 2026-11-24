@@ -5,12 +5,13 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>  // POSIX getopt, isatty, _exit
+#include <unistd.h>
 
-#define CLI_PROMPT       "sfm> "
-#define CLI_LINE_MAX     1025  // 1023 command chars + '\n' + '\0'
-#define CLI_MAX_TOKENS   8     // command name + arguments
-#define SECRET_SLOTS_MAX 16
+#define CLI_PROMPT "sfm> "
+
+constexpr size_t CLI_LINE_MAX = 1025;  // 1023 chars + '\n' + '\0'
+constexpr int CLI_MAX_TOKENS = 8;
+constexpr size_t SECRET_SLOTS_MAX = 16;
 
 typedef struct {
     volatile void *ptr;
@@ -22,10 +23,11 @@ static volatile sig_atomic_t has_saved_termios = 0;
 static struct termios saved_termios_copy = {};
 
 void cli_print_help(void) {
-    printf("Usage: %s [OPTION]\n\n", program_name);
-    printf("Options:\n");
-    printf("  -h    Show this help message and exit\n");
-    printf("  -v    Show program version and exit\n");
+    printf("Usage: %s [OPTION]\n\n"
+           "Options:\n"
+           "  -h    Show this help message and exit\n"
+           "  -v    Show program version and exit\n",
+           program_name);
 }
 
 void cli_print_version(void) {
@@ -33,18 +35,13 @@ void cli_print_version(void) {
 }
 
 CliStatus cli_parse(int argc, char **argv) {
-    if (argc == 1) {
-        return CLI_OK;
-    }
-
     opterr = 0;
     optind = 1;
 
     bool want_help = false;
     bool want_version = false;
-    int opt;
 
-    while ((opt = getopt(argc, argv, "hv")) != -1) {
+    for (int opt; (opt = getopt(argc, argv, "hv")) != -1;) {
         switch (opt) {
             case 'h': want_help = true; break;
             case 'v': want_version = true; break;
@@ -65,37 +62,29 @@ CliStatus cli_parse(int argc, char **argv) {
         cli_print_help();
         return CLI_EXIT_SUCCESS;
     }
-
     if (want_version) {
         cli_print_version();
         return CLI_EXIT_SUCCESS;
     }
-
     return CLI_OK;
 }
 
 /* ================= signal handling & secret registry ================= */
 
-static const int ignored_signals[] = {SIGINT, SIGQUIT, SIGTSTP};
-static const int term_signals[] = {SIGTERM, SIGHUP};
-
-static void block_term_signals(sigset_t *old_mask) {
-    sigset_t mask;
+static sigset_t block_term_signals(void) {
+    sigset_t mask, old_mask;
     sigemptyset(&mask);
-    for (size_t i = 0; i < sizeof term_signals / sizeof term_signals[0]; i++) {
-        (void)sigaddset(&mask, term_signals[i]);
-    }
-    (void)sigprocmask(SIG_BLOCK, &mask, old_mask);
+    sigaddset(&mask, SIGTERM);
+    sigaddset(&mask, SIGHUP);
+    sigprocmask(SIG_BLOCK, &mask, &old_mask);
+    return old_mask;
 }
 
-static void restore_signal_mask(const sigset_t *old_mask) {
-    (void)sigprocmask(SIG_SETMASK, old_mask, nullptr);
+static void restore_signals(const sigset_t *old_mask) {
+    sigprocmask(SIG_SETMASK, old_mask, nullptr);
 }
 
-/**
- * @brief Async-signal-safe termination handler: zeroes every registered
- *        secret buffer in RAM, restores terminal ECHO if active, and exits.
- */
+/* Async-signal-safe cleanup: wipe registered secrets, restore ECHO, and exit. */
 static void handle_termination_signal(int sig) {
     for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
         volatile unsigned char *p = (volatile unsigned char *)secret_slots[i].ptr;
@@ -108,7 +97,7 @@ static void handle_termination_signal(int sig) {
     }
 
     if (has_saved_termios != 0) {
-        (void)tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios_copy);
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios_copy);
     }
 
     _exit(128 + sig);
@@ -117,9 +106,7 @@ static void handle_termination_signal(int sig) {
 void cli_register_secret(volatile void *ptr, size_t len) {
     if (ptr == nullptr || len == 0) return;
 
-    sigset_t old_mask;
-    block_term_signals(&old_mask);
-
+    const sigset_t old_mask = block_term_signals();
     for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
         if (secret_slots[i].ptr == nullptr) {
             secret_slots[i].len = len;
@@ -128,16 +115,13 @@ void cli_register_secret(volatile void *ptr, size_t len) {
             break;
         }
     }
-
-    restore_signal_mask(&old_mask);
+    restore_signals(&old_mask);
 }
 
 void cli_unregister_secret(volatile void *ptr) {
     if (ptr == nullptr) return;
 
-    sigset_t old_mask;
-    block_term_signals(&old_mask);
-
+    const sigset_t old_mask = block_term_signals();
     for (size_t i = 0; i < SECRET_SLOTS_MAX; i++) {
         if (secret_slots[i].ptr == ptr) {
             secret_slots[i].ptr = nullptr;
@@ -146,50 +130,38 @@ void cli_unregister_secret(volatile void *ptr) {
             break;
         }
     }
-
-    restore_signal_mask(&old_mask);
+    restore_signals(&old_mask);
 }
 
 void cli_register_termios(const struct termios *saved) {
     if (saved == nullptr) return;
 
-    sigset_t old_mask;
-    block_term_signals(&old_mask);
-
+    const sigset_t old_mask = block_term_signals();
     saved_termios_copy = *saved;
     atomic_signal_fence(memory_order_seq_cst);
     has_saved_termios = 1;
-
-    restore_signal_mask(&old_mask);
+    restore_signals(&old_mask);
 }
 
 void cli_unregister_termios(void) {
-    sigset_t old_mask;
-    block_term_signals(&old_mask);
-
+    const sigset_t old_mask = block_term_signals();
     has_saved_termios = 0;
-
-    restore_signal_mask(&old_mask);
+    restore_signals(&old_mask);
 }
 
 bool cli_ignore_signals(void) {
-    struct sigaction ignore = {};
-    ignore.sa_handler = SIG_IGN;
-    sigemptyset(&ignore.sa_mask);
-
-    for (size_t i = 0; i < sizeof ignored_signals / sizeof ignored_signals[0]; i++) {
-        if (sigaction(ignored_signals[i], &ignore, nullptr) != 0) return false;
+    struct sigaction ign = {.sa_handler = SIG_IGN};
+    sigemptyset(&ign.sa_mask);
+    if (sigaction(SIGINT, &ign, nullptr) != 0 ||
+        sigaction(SIGQUIT, &ign, nullptr) != 0 ||
+        sigaction(SIGTSTP, &ign, nullptr) != 0) {
+        return false;
     }
 
-    struct sigaction terminate = {};
-    terminate.sa_handler = handle_termination_signal;
-    sigfillset(&terminate.sa_mask);
-
-    for (size_t i = 0; i < sizeof term_signals / sizeof term_signals[0]; i++) {
-        if (sigaction(term_signals[i], &terminate, nullptr) != 0) return false;
-    }
-
-    return true;
+    struct sigaction term = {.sa_handler = handle_termination_signal};
+    sigfillset(&term.sa_mask);
+    return sigaction(SIGTERM, &term, nullptr) == 0 &&
+           sigaction(SIGHUP, &term, nullptr) == 0;
 }
 
 /* ================= interactive shell ================= */
@@ -197,22 +169,21 @@ bool cli_ignore_signals(void) {
 typedef struct {
     const char *name;
     CommandHandler handler;
-    int min_args;
-    int max_args;
+    int expected_args;
     const char *usage;
     const char *description;
 } CliCommand;
 
 static const CliCommand command_table[] = {
-    {"list", cmd_list, 0, 0, "list", "List the encrypted files in the vault"},
-    {"encrypt", cmd_encrypt, 1, 1, "encrypt <absolute_path>", "Encrypt a file into the vault"},
-    {"decrypt", cmd_decrypt, 2, 2, "decrypt <file_in_vault> <absolute_destination_directory>", "Decrypt a file from the vault to a directory"},
-    {"secure_delete", cmd_secure_delete, 1, 1, "secure_delete <vault_file_or_absolute_path>", "Securely delete one of your files (vault or not)"},
+    {"list",          cmd_list,          0, "list",                                              "List the encrypted files in the vault"},
+    {"encrypt",       cmd_encrypt,       1, "encrypt <absolute_path>",                           "Encrypt a file into the vault"},
+    {"decrypt",       cmd_decrypt,       2, "decrypt <file_in_vault> <absolute_destination_directory>", "Decrypt a file from the vault to a directory"},
+    {"secure_delete", cmd_secure_delete, 1, "secure_delete <vault_file_or_absolute_path>",       "Securely delete one of your files (vault or not)"},
 };
 
-#define COMMAND_COUNT (sizeof command_table / sizeof command_table[0])
-#define TOKENIZE_TOO_MANY (-1)
-#define TOKENIZE_OPEN_QUOTE (-2)
+constexpr size_t COMMAND_COUNT = sizeof command_table / sizeof command_table[0];
+constexpr int TOKENIZE_TOO_MANY = -1;
+constexpr int TOKENIZE_OPEN_QUOTE = -2;
 
 static int tokenize(char *line, char *tokens[], int max) {
     int count = 0;
@@ -237,10 +208,8 @@ static int tokenize(char *line, char *tokens[], int max) {
         }
 
         if (in_quotes) return TOKENIZE_OPEN_QUOTE;
-
-        char *next = (*p != '\0') ? p + 1 : p;
+        if (*p != '\0') p++;
         *out = '\0';
-        p = next;
     }
 
     return count;
@@ -258,9 +227,10 @@ static void print_shell_help(void) {
     for (size_t i = 0; i < COMMAND_COUNT; i++) {
         printf("  %-26s %s\n", command_table[i].name, command_table[i].description);
     }
-    printf("  %-26s %s\n", "help", "Show this help");
-    printf("  %-26s %s\n", "exit", "Leave sfm");
-    printf("Tip: use double quotes around paths that contain spaces.\n");
+    printf("  %-26s Show this help\n"
+           "  %-26s Leave sfm\n"
+           "Tip: use double quotes around paths that contain spaces.\n",
+           "help", "exit");
 }
 
 static bool execute_line(const CommandContext *ctx, char *line) {
@@ -291,7 +261,7 @@ static bool execute_line(const CommandContext *ctx, char *line) {
     }
 
     const int nargs = count - 1;
-    if (nargs < cmd->min_args || nargs > cmd->max_args) {
+    if (nargs != cmd->expected_args) {
         (void)fprintf(stderr, "Usage: %s.\n", cmd->usage);
         return true;
     }
@@ -300,7 +270,6 @@ static bool execute_line(const CommandContext *ctx, char *line) {
     if (st != CMD_OK) {
         (void)fprintf(stderr, "%s: %s.\n", cmd->name, command_strerror(st));
     }
-
     return true;
 }
 
@@ -309,49 +278,44 @@ static CliStatus shell_loop(const CommandContext *ctx) {
 
     char line[CLI_LINE_MAX];
     cli_register_secret(line, sizeof line);
+    CliStatus status = CLI_EXIT_SUCCESS;
 
     while (true) {
         (void)fputs(CLI_PROMPT, stdout);
         (void)fflush(stdout);
 
         if (fgets(line, sizeof line, stdin) == nullptr) {
-            sodium_memzero(line, sizeof line);
             if (ferror(stdin)) {
-                cli_unregister_secret(line);
                 (void)fprintf(stderr, "Error reading input.\n");
-                return CLI_ERROR;
+                status = CLI_ERROR;
+                break;
             }
             if (!isatty(STDIN_FILENO)) {
-                cli_unregister_secret(line);
                 (void)fprintf(stderr, "\nInput closed.\n");
-                return CLI_ERROR;
+                status = CLI_ERROR;
+                break;
             }
             clearerr(stdin);
             printf("\nUse 'exit' to quit.\n");
+            sodium_memzero(line, sizeof line);
             continue;
         }
 
         const size_t len = strcspn(line, "\n");
         if (line[len] == '\n') {
             line[len] = '\0';
+            if (!execute_line(ctx, line)) break;
         } else if (len == sizeof line - 1) {
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF) { /* discard the rest */ }
-            sodium_memzero(line, sizeof line);
-            (void)fprintf(stderr, "Line too long (max %d characters).\n", CLI_LINE_MAX - 2);
-            continue;
-        } else {
-            sodium_memzero(line, sizeof line);
-            continue;
+            for (int c; (c = getchar()) != '\n' && c != EOF;) {}
+            (void)fprintf(stderr, "Line too long (max %zu characters).\n", CLI_LINE_MAX - 2);
         }
 
-        const bool keep_running = execute_line(ctx, line);
         sodium_memzero(line, sizeof line);
-        if (!keep_running) {
-            cli_unregister_secret(line);
-            return CLI_EXIT_SUCCESS;
-        }
     }
+
+    sodium_memzero(line, sizeof line);
+    cli_unregister_secret(line);
+    return status;
 }
 
 CliStatus cli_run(const CommandContext *ctx) {

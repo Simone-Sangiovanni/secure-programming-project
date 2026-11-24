@@ -5,21 +5,16 @@
 
 /**
  * @file auth.h
- * @brief Master password setup (first run) and login, using libsodium.
+ * @brief Master password setup and login using libsodium.
  *
- * Scheme:
+ * Key hierarchy:
  *   - salt     = 16 random bytes
- *   - master   = Argon2id(password, salt)                        (32 bytes)
- *   - verifier = HKDF-SHA256(master, salt, "sfm-verifier-v1")    (32 bytes)
- *   - KEK      = HKDF-SHA256(master, salt, "sfm-kek-v1")         (32 bytes)
+ *   - master   = Argon2id(password, salt)                     (32 bytes)
+ *   - verifier = HKDF-SHA256(master, salt, "sfm-verifier-v1") (32 bytes)
+ *   - KEK      = HKDF-SHA256(master, salt, "sfm-kek-v1")      (32 bytes)
  *
- * The salt and the verifier (both Base64) are stored in the config file.
- * The verifier and the Key-Encryption Key (KEK) are derived from the master
- * key via RFC 5869 HKDF-SHA256 with distinct domain-separation info labels,
- * so knowing the verifier (which sits on disk) does not reveal the KEK used
- * to wrap per-file Data-Encryption Keys (DEKs). Sensitive buffers are locked
- * in RAM with sodium_mlock(), registered with the termination signal handler,
- * and wiped with sodium_memzero() / sodium_munlock() immediately after use.
+ * Salt and verifier (Base64) are stored on disk; the KEK stays in mlocked RAM
+ * only and is registered with the signal handler for cleanup on termination.
  */
 
 #define AUTH_PASSWORD_MAX 66

@@ -3,87 +3,49 @@
 
 /**
  * @file config.h
- * @brief Loading, saving and inspecting the application configuration.
- *
- * The configuration is stored on disk as a JSON file (~/.config/sfm/sfm.config)
- * holding the KDF name, the salt and verifier (Base64) used for the master
- * password, and the paths of the vault, log file, and configuration file itself.
+ * @brief Loading, saving, and inspecting the SFM JSON configuration.
  */
 
-/** In-memory representation of the configuration file. */
+/** In-memory representation of ~/.config/sfm/sfm.config. */
 typedef struct {
-    char kdf[32];         /**< Name of the key derivation function. */
-    char salt[64];        /**< 16 bytes of salt encoded in Base64. */
-    char verifier[128];   /**< 32 bytes of verifier encoded in Base64. */
-    char vault_path[512]; /**< Path of the encrypted vault. */
-    char log_path[512];   /**< Path of the log file. */
-    char config_path[512];/**< Path this config was loaded from / saves to. */
+    char kdf[32];          /**< Key derivation function name (e.g. "argon2id"). */
+    char salt[64];         /**< Base64-encoded 16-byte master password salt. */
+    char verifier[128];    /**< Base64-encoded 32-byte master password verifier. */
+    char vault_path[512];  /**< Encrypted vault directory path. */
+    char log_path[512];    /**< Audit log file path. */
+    char config_path[512]; /**< Path this configuration file lives at. */
 } SfmConfig;
 
-/** Result codes returned by every config function. */
+/** Status codes returned by configuration functions. */
 typedef enum {
-    CONFIG_OK = 0,         /**< Success. */
-    CONFIG_ERR_ARGS,       /**< NULL pointer passed by the caller (a bug). */
-    CONFIG_ERR_NOT_FOUND,  /**< Config file does not exist (normal on first run). */
-    CONFIG_ERR_IO,         /**< Open/read/write/allocation failure. */
-    CONFIG_ERR_PARSE,      /**< File exists but is not valid JSON. */
-    CONFIG_ERR_INVALID     /**< File too big, or a value does not fit its field. */
+    CONFIG_OK = 0,        /**< Operation succeeded. */
+    CONFIG_ERR_ARGS,      /**< NULL pointer passed by caller. */
+    CONFIG_ERR_NOT_FOUND, /**< Configuration file does not exist yet. */
+    CONFIG_ERR_IO,        /**< File open, read, write, sync, or allocation failure. */
+    CONFIG_ERR_PARSE,     /**< Invalid JSON or inconsistent credential fields. */
+    CONFIG_ERR_INVALID    /**< File too large, field too long, or invalid path. */
 } ConfigStatus;
 
 /**
- * @brief Loads the configuration file into memory.
+ * @brief Loads and validates a JSON configuration file into @p cfg.
  *
- * Parses the JSON fields ("kdf", "salt", "verifier", "vault", "log", and
- * "config") and validates path invariants. @p cfg is modified only when the
- * function returns CONFIG_OK, so a failed load never leaves a half-filled
- * struct behind.
- *
- * @param file_path Path of the JSON config file to read.
- * @param cfg       Output struct to fill. Must not be NULL.
- * @return CONFIG_OK on success; CONFIG_ERR_NOT_FOUND if the file does not
- *         exist; CONFIG_ERR_PARSE / CONFIG_ERR_INVALID / CONFIG_ERR_IO /
- *         CONFIG_ERR_ARGS otherwise.
+ * Modifies @p cfg only if CONFIG_OK is returned.
  */
 [[nodiscard]] ConfigStatus load_config(const char *file_path, SfmConfig *cfg);
 
 /**
- * @brief Writes the configuration to disk as JSON.
- *
- * Serializes all six configuration fields ("kdf", "salt", "verifier",
- * "vault", "log", "config") to a temporary file in the same folder (mode
- * 0600), flushes to disk, and atomically renames over @p file_path.
- *
- * @param file_path Destination path.
- * @param cfg       Configuration to write. Must not be NULL.
- * @return CONFIG_OK on success, CONFIG_ERR_IO if the file could not be fully
- *         written (the old file is left untouched), CONFIG_ERR_ARGS if a
- *         pointer is NULL.
+ * @brief Atomically writes @p cfg as JSON to @p file_path (mode 0600, fsync + rename).
  */
 [[nodiscard]] ConfigStatus save_config(const char *file_path, const SfmConfig *cfg);
 
 /**
- * @brief Fills @p cfg with default values and no master password.
- *
- * Used when the configuration file is created for the first time. The
- * resulting struct has an empty salt and verifier, so config_is_first_run()
- * returns true for it.
- *
- * @param cfg         Struct to initialise. Must not be NULL.
- * @param config_path Path the config will be saved to.
- * @param vault_path  Path of the vault folder.
- * @param log_path    Path of the log file.
- * @return CONFIG_OK on success, CONFIG_ERR_INVALID if a path does not fit in
- *         the struct, CONFIG_ERR_ARGS if a pointer is NULL.
+ * @brief Initializes @p cfg with default KDF ("argon2id"), paths, and empty credentials.
  */
 [[nodiscard]] ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
                                                const char *vault_path, const char *log_path);
 
 /**
- * @brief Tells whether the program has no master password set up yet.
- *
- * @param cfg Loaded configuration.
- * @return true if the salt or the verifier is empty (or @p cfg is NULL),
- *         false if both are present.
+ * @brief Returns true if @p cfg is NULL or has no master password configured yet.
  */
 [[nodiscard]] bool config_is_first_run(const SfmConfig *cfg);
 
