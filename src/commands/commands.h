@@ -54,7 +54,13 @@ typedef CommandStatus (*CommandHandler)(const CommandContext *ctx, int argc, cha
  */
 [[nodiscard]] CommandStatus cmd_decrypt(const CommandContext *ctx, int argc, char *argv[]);
 
-/** secure_delete <file_name>: securely deletes an encrypted file from the vault. */
+/**
+ * secure_delete <vault_file | absolute_path>: securely deletes a file.
+ *
+ * A plain name (no '/') designates a file of the vault and must end in ".sfm".
+ * An absolute path designates any regular file owned by the current user, inside
+ * or outside the vault. Symlinks, directories and other users' files are refused.
+ */
 [[nodiscard]] CommandStatus cmd_secure_delete(const CommandContext *ctx, int argc, char *argv[]);
 
 /** Returns a human-readable message for a CommandStatus (never NULL). */

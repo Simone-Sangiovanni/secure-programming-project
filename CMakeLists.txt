@@ -166,3 +166,28 @@ if(ENABLE_SANITIZERS)
         $<$<CONFIG:Debug>:-fsanitize=address,undefined>
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# Installation (system-wide, shared by all users: sudo cmake --install build)
+# ---------------------------------------------------------------------------
+install(TARGETS sfm RUNTIME DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# Test (run with: ctest --test-dir build --output-on-failure -V)
+#
+# tests/test_sfm.py starts the real sfm in a pseudo-terminal and checks the
+# behaviour described in the test specification. It needs Python 3 and must be
+# run as a normal user (sfm refuses to run as root; the test is then skipped).
+# ---------------------------------------------------------------------------
+option(BUILD_TESTS "Register the end-to-end test with CTest" ON)
+
+if(BUILD_TESTS)
+    enable_testing()
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME e2e
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sfm.py
+                         $<TARGET_FILE:sfm>)
+        set_tests_properties(e2e PROPERTIES TIMEOUT 1500 SKIP_RETURN_CODE 77)
+    endif()
+endif()

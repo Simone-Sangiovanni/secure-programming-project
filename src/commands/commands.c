@@ -75,13 +75,15 @@ CommandStatus cmd_list(const CommandContext *ctx,
 
 CommandStatus cmd_encrypt(const CommandContext *ctx, [[maybe_unused]] int argc, char *argv[]) {
     if (ctx == nullptr || ctx->key == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
-    const char *in_path = argv[0];
+    const char *requested_path = argv[0];
 
-    // 1. Validate input path
-    const ValidateStatus vs = validate_absolute_path(in_path);
+    // 1. Validate the path text and canonicalize its parent directory.
+    //    The file itself is not resolved: it is opened with O_NOFOLLOW later.
+    char in_path[VALIDATE_PATH_MAX];
+    const ValidateStatus vs = validate_file_path(requested_path, in_path);
     if (vs != VALIDATE_OK) {
         (void)fprintf(stderr, "encrypt: %s\n", validate_strerror(vs));
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_FAILURE, in_path);
+        log_audit_event(ctx->cfg, LOG_EVENT_FILE_ENCRYPT, LOG_OUTCOME_FAILURE, requested_path);
         return CMD_ERR_FAILED;
     }
 
@@ -188,37 +190,44 @@ CommandStatus cmd_decrypt(const CommandContext *ctx, [[maybe_unused]] int argc, 
 
 CommandStatus cmd_secure_delete(const CommandContext *ctx, [[maybe_unused]] int argc, char *argv[]) {
     if (ctx == nullptr || ctx->cfg == nullptr) return CMD_ERR_FAILED;
-    const char *vault_file = argv[0];
-
-    if (strchr(vault_file, '/') != nullptr) {
-        (void)fprintf(stderr, "secure_delete: vault file name must not contain '/'\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
-    }
-    if (!has_encrypted_extension(vault_file)) {
-        (void)fprintf(stderr, "secure_delete: only files ending in '" ENCRYPTED_EXT "' can be deleted\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
-    }
-
+    const char *arg = argv[0];
     char target_path[VALIDATE_PATH_MAX];
-    const int n = snprintf(target_path, sizeof target_path, "%s/%s",
-                           ctx->cfg->vault_path, vault_file);
-    if (n < 0 || (size_t)n >= sizeof target_path) {
-        (void)fprintf(stderr, "secure_delete: the file path is too long\n");
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, vault_file);
-        return CMD_ERR_FAILED;
+
+    if (strchr(arg, '/') == nullptr) {
+        // A plain name: a file of the vault.
+        if (!has_encrypted_extension(arg)) {
+            (void)fprintf(stderr,
+                          "secure_delete: a vault file name must end in '" ENCRYPTED_EXT
+                          "' (use an absolute path to delete other files)\n");
+            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
+            return CMD_ERR_FAILED;
+        }
+        const int n = snprintf(target_path, sizeof target_path, "%s/%s", ctx->cfg->vault_path, arg);
+        if (n < 0 || (size_t)n >= sizeof target_path) {
+            (void)fprintf(stderr, "secure_delete: the file path is too long\n");
+            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
+            return CMD_ERR_FAILED;
+        }
+    } else {
+        // A path: any file of the user, inside or outside the vault. The directory part is
+        // canonicalized; the file itself is opened with O_NOFOLLOW and its owner is verified.
+        const ValidateStatus vs = validate_file_path(arg, target_path);
+        if (vs != VALIDATE_OK) {
+            (void)fprintf(stderr, "secure_delete: %s\n", validate_strerror(vs));
+            log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
+            return CMD_ERR_FAILED;
+        }
     }
 
     const FileIoStatus st = fileio_secure_delete(target_path);
     if (st != FILEIO_OK) {
-        (void)fprintf(stderr, "secure_delete: '%s': %s\n", vault_file, fileio_strerror(st));
-        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, vault_file);
+        (void)fprintf(stderr, "secure_delete: '%s': %s\n", arg, fileio_strerror(st));
+        log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_FAILURE, arg);
         return CMD_ERR_FAILED;
     }
 
-    printf("Deleted: '%s'\n", vault_file);
-    log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_SUCCESS, vault_file);
+    printf("Deleted: '%s'\n", target_path);
+    log_audit_event(ctx->cfg, LOG_EVENT_FILE_DELETE, LOG_OUTCOME_SUCCESS, arg);
     return CMD_OK;
 }
 

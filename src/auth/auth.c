@@ -1,7 +1,9 @@
 #include "auth.h"
 #include "../cli/cli.h"
+#include "../log/log.h"
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <sodium.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -58,20 +60,34 @@ static AuthStatus read_password(const char *prompt, char *buff, size_t size) {
     (void)fputs(prompt, stderr);
     (void)fflush(stderr);
 
+    // The password is read with read(2) straight into the caller's (locked, wiped) buffer.
+    // fgets()/stdio would leave a second copy in libc's input buffer, which cannot be wiped.
+    // At most size-2 characters are kept (64 for AUTH_PASSWORD_MAX); the rest of a longer
+    // line is read and discarded so it does not reach the shell later.
     AuthStatus status = AUTH_OK;
-    if (fgets(buff, (int)size, stdin) == nullptr) {
-        status = AUTH_ERR_IO;
-    } else {
-        const size_t len = strcspn(buff, "\n");
-        if (buff[len] == '\n') {
-            buff[len] = '\0';
+    size_t len = 0;
+    bool too_long = false;
+    while (true) {
+        char c;
+        const ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            status = AUTH_ERR_IO;
+            break;
+        }
+        if (n == 0) {  // end of input (Ctrl-D)
+            status = AUTH_ERR_IO;
+            break;
+        }
+        if (c == '\n') break;
+        if (len + 2 < size) {
+            buff[len++] = c;
         } else {
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF) { /* discard */ }
-            status = AUTH_ERR_TOO_LONG;
+            too_long = true;
         }
     }
-
+    buff[len] = '\0';
+    if (status == AUTH_OK && too_long) status = AUTH_ERR_TOO_LONG;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_settings) != 0 && status == AUTH_OK) {
         status = AUTH_ERR_IO;
     }
@@ -371,6 +387,9 @@ AuthStatus auth_login(const SfmConfig *cfg, unsigned char *key_out) {
         wipe_and_unlock(key, sizeof key);
 
         if (status != AUTH_ERR_WRONG_PASSWORD) break;
+
+        // Every failed attempt is audited individually (brute-force trail).
+        log_audit_event(cfg, LOG_EVENT_LOGIN, LOG_OUTCOME_FAILURE, nullptr);
 
         (void)fprintf(stderr, "Wrong password. Waiting %u second%s before next attempt...\n",
                       backoff_sec, (backoff_sec == 1U) ? "" : "s");

@@ -17,7 +17,8 @@ typedef enum {
     VALIDATE_ERR_TOO_LONG,     /**< Longer than VALIDATE_PATH_MAX - 1 bytes. */
     VALIDATE_ERR_NOT_A_FILE,   /**< Ends with '/', so it names a directory. */
     VALIDATE_ERR_TRAVERSAL,    /**< Path contains traversal components (.. or .). */
-    VALIDATE_ERR_NOT_A_DIR     /**< Directory does not exist or is not a directory. */
+    VALIDATE_ERR_NOT_A_DIR,    /**< Directory does not exist or is not a directory. */
+    VALIDATE_ERR_PARENT        /**< The parent directory of a file path does not exist or is not a directory. */
 } ValidateStatus;
 
 /**
@@ -30,6 +31,22 @@ typedef enum {
  * @return VALIDATE_OK or the reason it was rejected.
  */
 [[nodiscard]] ValidateStatus validate_absolute_path(const char *path);
+
+/**
+ * @brief Checks that @p path is a usable absolute file path and canonicalizes
+ *        its PARENT directory (realpath), so symbolic links in the directory
+ *        part are resolved before the file is used.
+ *
+ * The final component (the file itself) is deliberately NOT resolved: it is
+ * opened later with O_NOFOLLOW, so a symlink named as the file is refused.
+ * The file does not have to exist.
+ *
+ * @param path         File path typed by the user.
+ * @param resolved_out Buffer receiving "<canonical parent>/<file name>".
+ * @return VALIDATE_OK or the reason it was rejected.
+ */
+[[nodiscard]] ValidateStatus validate_file_path(const char *path,
+                                                char resolved_out[VALIDATE_PATH_MAX]);
 
 /**
  * @brief Checks that @p path is an existing absolute directory path and
