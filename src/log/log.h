@@ -7,7 +7,7 @@
  * @file log.h
  * @brief Structured JSON Lines audit logging for security-relevant events.
  *
- * Records events to the user's state log file (~/.local/state/sfm/sfm.log).
+ * Appends records to the user's state log file (~/.local/state/sfm/sfm.log).
  * Every entry includes:
  *   - timestamp: UTC ISO-8601 timestamp (e.g. "2026-11-16T20:00:00Z")
  *   - event:     operation name ("login", "master_password_setup",
@@ -37,19 +37,15 @@ typedef enum {
 /**
  * @brief Appends a single JSON Lines audit record to @p cfg->log_path.
  *
- * Verifies ownership and regular-file status on the opened file descriptor
- * before writing. Logging failures are handled gracefully without crashing
- * the application.
+ * Verifies regular-file status and owner UID on the opened file descriptor
+ * before writing. Logging failures are ignored so logging never crashes callers.
  *
  * @param cfg     Loaded configuration containing log_path.
- * @param event   The security-relevant action performed.
+ * @param event   Security-relevant action performed.
  * @param outcome Whether the action succeeded or failed.
- * @param target  Optional file path or filename associated with the action
- *                (may be NULL). Only the sanitized basename is recorded.
+ * @param target  Optional file path or name (may be nullptr); only the
+ *                sanitized basename is recorded.
  */
-void log_audit_event(const SfmConfig *cfg,
-                     LogEvent event,
-                     LogOutcome outcome,
-                     const char *target);
+void log_audit_event(const SfmConfig *cfg, LogEvent event, LogOutcome outcome, const char *target);
 
 #endif

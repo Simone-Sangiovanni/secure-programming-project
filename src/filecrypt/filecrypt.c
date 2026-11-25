@@ -3,7 +3,42 @@
 #include <sodium.h>
 #include <stdlib.h>
 
-#define ENC_CHUNK_MAX (CIPHER_CHUNK_SIZE + CIPHER_TAG_BYTES)  // bytes of one encrypted chunk
+#define ENC_CHUNK_MAX (CIPHER_CHUNK_SIZE + CIPHER_TAG_BYTES)
+
+typedef struct {
+    FileReader *in;
+    FileWriter *out;
+    CipherStream *stream;
+    unsigned char *plain;
+    unsigned char *enc;
+} CryptCtx;
+
+static FileCryptResult err_in(FileIoStatus status) {
+    return (FileCryptResult){.io = status, .cipher = CIPHER_OK, .io_on_output = false};
+}
+
+static FileCryptResult err_out(FileIoStatus status) {
+    return (FileCryptResult){.io = status, .cipher = CIPHER_OK, .io_on_output = true};
+}
+
+static FileCryptResult err_cipher(CipherStatus status) {
+    return (FileCryptResult){.io = FILEIO_OK, .cipher = status, .io_on_output = false};
+}
+
+static bool alloc_buffers(CryptCtx *ctx) {
+    // Keep plaintext in locked, guard-page-protected memory.
+    ctx->plain = sodium_malloc(CIPHER_CHUNK_SIZE);
+    ctx->enc = malloc(ENC_CHUNK_MAX);
+    return ctx->plain != nullptr && ctx->enc != nullptr;
+}
+
+static void cleanup(CryptCtx *ctx) {
+    fileio_writer_abort(ctx->out);   // no-op if finished; otherwise removes partial output
+    cipher_stream_free(ctx->stream);
+    sodium_free(ctx->plain);         // zeroes, unlocks, and frees locked plaintext buffer
+    cipher_free(ctx->enc, ENC_CHUNK_MAX);
+    fileio_reader_close(ctx->in);
+}
 
 bool filecrypt_ok(FileCryptResult result) {
     return result.io == FILEIO_OK && result.cipher == CIPHER_OK;
@@ -11,151 +46,121 @@ bool filecrypt_ok(FileCryptResult result) {
 
 FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                   const char *in_path, const char *out_path) {
-    FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
     if (kek == nullptr || in_path == nullptr || out_path == nullptr) {
-        res.cipher = CIPHER_ERR_ARGS;
-        return res;
+        return err_cipher(CIPHER_ERR_ARGS);
     }
 
-    FileReader *in = nullptr;
-    FileWriter *out = nullptr;
-    CipherStream *stream = nullptr;
-    unsigned char *plain = nullptr;
-    unsigned char *enc = nullptr;
+    CryptCtx ctx = {0};
+    FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
     unsigned char header[CIPHER_HEADER_BYTES];
-    uint64_t size = 0;
+    uint64_t remaining = 0;
 
-    FileIoStatus fs = fileio_reader_open(in_path, &in, &size);
-    if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
+    FileIoStatus fs = fileio_reader_open(in_path, &ctx.in, &remaining);
+    if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
 
-    // The encrypted file is larger than the input: check that IT fits too.
-    if (cipher_encrypted_size(size) > FILEIO_MAX_SIZE) {
-        res.io = FILEIO_ERR_TOO_BIG;
-        res.io_on_output = true;
+    // Ensure the encrypted output (plaintext + framing overhead) also fits within FILEIO_MAX_SIZE.
+    if (cipher_encrypted_size(remaining) > FILEIO_MAX_SIZE) {
+        res = err_out(FILEIO_ERR_TOO_BIG);
         goto cleanup;
     }
 
-    // Keep plaintext chunk buffer in locked, guard-page-protected memory.
-    plain = sodium_malloc(CIPHER_CHUNK_SIZE);
-    enc = malloc(ENC_CHUNK_MAX);
-    if (plain == nullptr || enc == nullptr) { res.io = FILEIO_ERR_ALLOC; goto cleanup; }
+    if (!alloc_buffers(&ctx)) { res = err_in(FILEIO_ERR_ALLOC); goto cleanup; }
 
-    CipherStatus cs = cipher_encrypt_begin(kek, &stream, header);
-    if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
+    CipherStatus cs = cipher_encrypt_begin(kek, &ctx.stream, header);
+    if (cs != CIPHER_OK) { res = err_cipher(cs); goto cleanup; }
 
-    fs = fileio_writer_create(out_path, &out);
-    if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; goto cleanup; }
+    fs = fileio_writer_create(out_path, &ctx.out);
+    if (fs != FILEIO_OK) { res = err_out(fs); goto cleanup; }
 
-    fs = fileio_writer_write(out, header, sizeof header);
-    if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; goto cleanup; }
+    fs = fileio_writer_write(ctx.out, header, sizeof header);
+    if (fs != FILEIO_OK) { res = err_out(fs); goto cleanup; }
 
-    uint64_t remaining = size;
-    bool last;
-    do {
-        const size_t want = (remaining < CIPHER_CHUNK_SIZE) ? (size_t)remaining : CIPHER_CHUNK_SIZE;
-
+    bool last = false;
+    while (!last) {
+        const size_t want = remaining < CIPHER_CHUNK_SIZE ? (size_t)remaining : CIPHER_CHUNK_SIZE;
         size_t got = 0;
-        fs = fileio_reader_read(in, plain, want, &got);
-        if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
-        if (got != want) { res.io = FILEIO_ERR_READ; goto cleanup; }  // file shrank while reading
+
+        fs = fileio_reader_read(ctx.in, ctx.plain, want, &got);
+        if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
+        if (got != want) { res = err_in(FILEIO_ERR_READ); goto cleanup; }  // file shrank mid-read
 
         remaining -= want;
-        last = (remaining == 0);  // an empty file is one empty "last" chunk
+        last = (remaining == 0);  // an empty file still produces one empty FINAL chunk
 
         size_t enc_len = 0;
-        cs = cipher_encrypt_chunk(stream, plain, want, last, enc, &enc_len);
-        if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
+        cs = cipher_encrypt_chunk(ctx.stream, ctx.plain, want, last, ctx.enc, &enc_len);
+        if (cs != CIPHER_OK) { res = err_cipher(cs); goto cleanup; }
 
-        fs = fileio_writer_write(out, enc, enc_len);
-        if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; goto cleanup; }
-    } while (!last);
+        fs = fileio_writer_write(ctx.out, ctx.enc, enc_len);
+        if (fs != FILEIO_OK) { res = err_out(fs); goto cleanup; }
+    }
 
-    fs = fileio_writer_finish(out);  // frees `out` whether it succeeds or not
-    out = nullptr;
-    if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; }
+    fs = fileio_writer_finish(ctx.out);  // consumes `ctx.out` regardless of outcome
+    ctx.out = nullptr;
+    if (fs != FILEIO_OK) { res = err_out(fs); }
 
 cleanup:
-    fileio_writer_abort(out);  // no-op if finished; otherwise removes the partial file
-    cipher_stream_free(stream);
-    sodium_free(plain);  // zeroes, unlocks, and frees the locked plaintext buffer
-    cipher_free(enc, ENC_CHUNK_MAX);
-    fileio_reader_close(in);
+    cleanup(&ctx);
     return res;
 }
 
 FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
                                   const char *in_path, const char *out_path) {
-    FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
     if (kek == nullptr || in_path == nullptr || out_path == nullptr) {
-        res.cipher = CIPHER_ERR_ARGS;
-        return res;
+        return err_cipher(CIPHER_ERR_ARGS);
     }
 
-    FileReader *in = nullptr;
-    FileWriter *out = nullptr;
-    CipherStream *stream = nullptr;
-    unsigned char *plain = nullptr;
-    unsigned char *enc = nullptr;
+    CryptCtx ctx = {0};
+    FileCryptResult res = {FILEIO_OK, CIPHER_OK, false};
     unsigned char header[CIPHER_HEADER_BYTES];
-    uint64_t size = 0;
+    uint64_t ignored_size = 0;
     size_t got = 0;
 
-    FileIoStatus fs = fileio_reader_open(in_path, &in, &size);
-    if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
+    FileIoStatus fs = fileio_reader_open(in_path, &ctx.in, &ignored_size);
+    if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
 
     // Validate the header BEFORE creating any output file.
-    fs = fileio_reader_read(in, header, sizeof header, &got);
-    if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
-    if (got != sizeof header) { res.cipher = CIPHER_ERR_FORMAT; goto cleanup; }
+    fs = fileio_reader_read(ctx.in, header, sizeof header, &got);
+    if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
+    if (got != sizeof header) { res = err_cipher(CIPHER_ERR_FORMAT); goto cleanup; }
 
-    CipherStatus cs = cipher_decrypt_begin(kek, header, &stream);
-    if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
+    CipherStatus cs = cipher_decrypt_begin(kek, header, &ctx.stream);
+    if (cs != CIPHER_OK) { res = err_cipher(cs); goto cleanup; }
 
-    // Keep plaintext chunk buffer in locked, guard-page-protected memory.
-    plain = sodium_malloc(CIPHER_CHUNK_SIZE);
-    enc = malloc(ENC_CHUNK_MAX);
-    if (plain == nullptr || enc == nullptr) { res.io = FILEIO_ERR_ALLOC; goto cleanup; }
+    if (!alloc_buffers(&ctx)) { res = err_in(FILEIO_ERR_ALLOC); goto cleanup; }
 
-    fs = fileio_writer_create(out_path, &out);
-    if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; goto cleanup; }
+    fs = fileio_writer_create(out_path, &ctx.out);
+    if (fs != FILEIO_OK) { res = err_out(fs); goto cleanup; }
 
-    for (;;) {
-        fs = fileio_reader_read(in, enc, ENC_CHUNK_MAX, &got);
-        if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
+    bool last = false;
+    while (!last) {
+        fs = fileio_reader_read(ctx.in, ctx.enc, ENC_CHUNK_MAX, &got);
+        if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
 
-        // got == 0 here means the file ended without a FINAL chunk (truncated):
-        // cipher_decrypt_chunk reports that as an authentication failure.
+        // If got == 0 (truncated stream without a FINAL chunk), cipher_decrypt_chunk fails auth.
         size_t plain_len = 0;
-        bool last = false;
-        cs = cipher_decrypt_chunk(stream, enc, got, plain, &plain_len, &last);
-        if (cs != CIPHER_OK) { res.cipher = cs; goto cleanup; }
+        cs = cipher_decrypt_chunk(ctx.stream, ctx.enc, got, ctx.plain, &plain_len, &last);
+        if (cs != CIPHER_OK) { res = err_cipher(cs); goto cleanup; }
 
-        // Every chunk except the last is full-size; anything else is not our format.
-        if (!last && got != ENC_CHUNK_MAX) { res.cipher = CIPHER_ERR_AUTH; goto cleanup; }
+        // Every chunk before FINAL must be full-size.
+        if (!last && got != ENC_CHUNK_MAX) { res = err_cipher(CIPHER_ERR_AUTH); goto cleanup; }
 
-        fs = fileio_writer_write(out, plain, plain_len);
-        if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; goto cleanup; }
-
-        if (last) {
-            // Nothing may follow the FINAL chunk.
-            unsigned char extra;
-            size_t n = 0;
-            fs = fileio_reader_read(in, &extra, 1, &n);
-            if (fs != FILEIO_OK) { res.io = fs; goto cleanup; }
-            if (n != 0) { res.cipher = CIPHER_ERR_AUTH; goto cleanup; }
-            break;
-        }
+        fs = fileio_writer_write(ctx.out, ctx.plain, plain_len);
+        if (fs != FILEIO_OK) { res = err_out(fs); goto cleanup; }
     }
 
-    fs = fileio_writer_finish(out);  // frees `out` whether it succeeds or not
-    out = nullptr;
-    if (fs != FILEIO_OK) { res.io = fs; res.io_on_output = true; }
+    // Reject any trailing bytes after the FINAL chunk.
+    unsigned char extra = 0;
+    size_t trailing = 0;
+    fs = fileio_reader_read(ctx.in, &extra, 1, &trailing);
+    if (fs != FILEIO_OK) { res = err_in(fs); goto cleanup; }
+    if (trailing != 0) { res = err_cipher(CIPHER_ERR_AUTH); goto cleanup; }
+
+    fs = fileio_writer_finish(ctx.out);  // consumes `ctx.out` regardless of outcome
+    ctx.out = nullptr;
+    if (fs != FILEIO_OK) { res = err_out(fs); }
 
 cleanup:
-    fileio_writer_abort(out);  // no-op if finished; otherwise removes the partial plaintext
-    cipher_stream_free(stream);
-    sodium_free(plain);  // zeroes, unlocks, and frees the locked plaintext buffer
-    cipher_free(enc, ENC_CHUNK_MAX);
-    fileio_reader_close(in);
+    cleanup(&ctx);
     return res;
 }
