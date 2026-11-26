@@ -16,17 +16,16 @@ struct FileReader {
 
 struct FileWriter {
     int fd;
-    char *tmp_path;    // temporary file being written (removed on abort or after link)
-    char *final_path;  // target destination path
+    char *tmp_path;
+    char *final_path;
 };
 
-// Opens an existing regular file owned by the current user without following
-// symlinks or blocking on FIFOs, validating metadata on the open fd (no TOCTOU).
-static FileIoStatus open_verified(const char *path, int access_flags, int *out_fd, uint64_t *out_size) {
-    const int fd = open(path, access_flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+/* Opens a regular file owned by the current user without following symlinks (TOCTOU-safe). */
+static FileIoStatus open_verified(const char *path, int flags, int *out_fd, uint64_t *out_size) {
+    const int fd = open(path, flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         if (errno == ENOENT) return FILEIO_ERR_NOT_FOUND;
-        if (errno == ELOOP) return FILEIO_ERR_NOT_REGULAR;  // symlink refused
+        if (errno == ELOOP)  return FILEIO_ERR_NOT_REGULAR;
         return FILEIO_ERR_OPEN;
     }
 
@@ -41,16 +40,13 @@ static FileIoStatus open_verified(const char *path, int access_flags, int *out_f
         (void)close(fd);
         return err;
     }
-
     *out_fd = fd;
     *out_size = (uint64_t)st.st_size;
     return FILEIO_OK;
 }
 
-// Writes the full buffer, retrying on EINTR.
 static bool write_all(int fd, const unsigned char *buf, size_t len) {
-    size_t done = 0;
-    while (done < len) {
+    for (size_t done = 0; done < len;) {
         const ssize_t n = write(fd, buf + done, len - done);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -74,14 +70,12 @@ FileIoStatus fileio_reader_open(const char *path, FileReader **reader, uint64_t 
 
     int fd = -1;
     uint64_t file_size = 0;
-    const FileIoStatus status = open_verified(path, O_RDONLY, &fd, &file_size);
-    if (status != FILEIO_OK) return status;
+    const FileIoStatus st = open_verified(path, O_RDONLY, &fd, &file_size);
+    if (st != FILEIO_OK) return st;
 
     FileReader *r = malloc(sizeof *r);
-    if (r == nullptr) {
-        (void)close(fd);
-        return FILEIO_ERR_ALLOC;
-    }
+    if (r == nullptr) { (void)close(fd); return FILEIO_ERR_ALLOC; }
+
     *r = (FileReader){.fd = fd};
     *reader = r;
     *size = file_size;
@@ -98,7 +92,7 @@ FileIoStatus fileio_reader_read(FileReader *reader, unsigned char *buf, size_t w
             if (errno == EINTR) continue;
             return FILEIO_ERR_READ;
         }
-        if (n == 0) break;  // EOF
+        if (n == 0) break;
         done += (size_t)n;
     }
     *got = done;
@@ -176,14 +170,11 @@ FileIoStatus fileio_secure_delete(const char *path) {
 
     int fd = -1;
     uint64_t remaining = 0;
-    const FileIoStatus status = open_verified(path, O_RDWR, &fd, &remaining);
-    if (status != FILEIO_OK) return status;
+    const FileIoStatus st = open_verified(path, O_RDWR, &fd, &remaining);
+    if (st != FILEIO_OK) return st;
 
     unsigned char *zeros = calloc(1, ZERO_CHUNK_SIZE);
-    if (zeros == nullptr) {
-        (void)close(fd);
-        return FILEIO_ERR_ALLOC;
-    }
+    if (zeros == nullptr) { (void)close(fd); return FILEIO_ERR_ALLOC; }
 
     bool ok = true;
     while (remaining > 0 && ok) {
@@ -193,29 +184,29 @@ FileIoStatus fileio_secure_delete(const char *path) {
     }
     free(zeros);
 
-    ok = (ok && fsync(fd) == 0);
-    ok = (close(fd) == 0) && ok;
-    if (!ok) return FILEIO_ERR_WRITE;
+    const bool synced = ok && (fsync(fd) == 0);
+    const bool closed = (close(fd) == 0);
+    if (!synced || !closed) return FILEIO_ERR_WRITE;
 
-    if (unlink(path) != 0) {
-        return (errno == ENOENT) ? FILEIO_ERR_NOT_FOUND : FILEIO_ERR_WRITE;
-    }
+    if (unlink(path) != 0) return (errno == ENOENT) ? FILEIO_ERR_NOT_FOUND : FILEIO_ERR_WRITE;
     return FILEIO_OK;
 }
 
 const char *fileio_strerror(FileIoStatus status) {
-    switch (status) {
-        case FILEIO_OK:              return "ok";
-        case FILEIO_ERR_ARGS:        return "invalid arguments (internal error)";
-        case FILEIO_ERR_NOT_FOUND:   return "file not found";
-        case FILEIO_ERR_OPEN:        return "cannot open or create the file (permissions?)";
-        case FILEIO_ERR_NOT_REGULAR: return "not a regular file (directories, devices and symlinks are refused)";
-        case FILEIO_ERR_OWNER:       return "file belongs to another user";
-        case FILEIO_ERR_TOO_BIG:     return "exceeds the size limit (256 GiB)";
-        case FILEIO_ERR_READ:        return "error while reading the file";
-        case FILEIO_ERR_ALLOC:       return "out of memory";
-        case FILEIO_ERR_EXISTS:      return "output file already exists (not overwritten)";
-        case FILEIO_ERR_WRITE:       return "error while writing the file";
-    }
-    return "unknown error";
+    static const char *const messages[] = {
+        [FILEIO_OK]              = "ok",
+        [FILEIO_ERR_ARGS]        = "invalid arguments (internal error)",
+        [FILEIO_ERR_NOT_FOUND]   = "file not found",
+        [FILEIO_ERR_OPEN]        = "cannot open or create the file (permissions?)",
+        [FILEIO_ERR_NOT_REGULAR] = "not a regular file (directories, devices and symlinks are refused)",
+        [FILEIO_ERR_OWNER]       = "file belongs to another user",
+        [FILEIO_ERR_TOO_BIG]     = "exceeds the size limit (256 GiB)",
+        [FILEIO_ERR_READ]        = "error while reading the file",
+        [FILEIO_ERR_ALLOC]       = "out of memory",
+        [FILEIO_ERR_EXISTS]      = "output file already exists (not overwritten)",
+        [FILEIO_ERR_WRITE]       = "error while writing the file",
+    };
+    const size_t idx = (size_t)status;
+    return (idx < sizeof messages / sizeof messages[0] && messages[idx] != nullptr)
+           ? messages[idx] : "unknown error";
 }

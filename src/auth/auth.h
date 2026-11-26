@@ -3,22 +3,8 @@
 
 #include "../config/config.h"
 
-/**
- * @file auth.h
- * @brief Master password setup and login using libsodium.
- *
- * Key hierarchy:
- *   - salt     = 16 random bytes
- *   - master   = Argon2id(password, salt)                     (32 bytes)
- *   - verifier = HKDF-SHA256(master, salt, "sfm-verifier-v1") (32 bytes)
- *   - KEK      = HKDF-SHA256(master, salt, "sfm-kek-v1")      (32 bytes)
- *
- * Salt and verifier (Base64) are stored on disk; the KEK stays in mlocked RAM
- * only and is registered with the signal handler for cleanup on termination.
- */
-
 #define AUTH_PASSWORD_MAX 66
-#define AUTH_KEY_BYTES 32
+#define AUTH_KEY_BYTES    32
 
 typedef enum {
     AUTH_OK = 0,

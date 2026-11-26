@@ -8,10 +8,8 @@
 #define MAGIC_LEN            4U
 #define FORMAT_VERSION       3U
 #define AD_LEN               (MAGIC_LEN + 1U)
-
 #define WRAP_NONCE_BYTES     crypto_aead_xchacha20poly1305_ietf_NPUBBYTES
 #define WRAPPED_DEK_BYTES    (CIPHER_KEY_BYTES + crypto_aead_xchacha20poly1305_ietf_ABYTES)
-
 #define WRAP_NONCE_OFFSET    AD_LEN
 #define WRAPPED_DEK_OFFSET   (WRAP_NONCE_OFFSET + WRAP_NONCE_BYTES)
 #define STREAM_HEADER_OFFSET (WRAPPED_DEK_OFFSET + WRAPPED_DEK_BYTES)
@@ -28,7 +26,7 @@ struct CipherStream {
     unsigned char ad[AD_LEN];
 };
 
-static CipherStream *stream_open(const unsigned char ad[AD_LEN], unsigned char dek[CIPHER_KEY_BYTES]) {
+static CipherStream *stream_alloc(const unsigned char ad[AD_LEN], unsigned char dek[CIPHER_KEY_BYTES]) {
     CipherStream *s = sodium_malloc(sizeof *s);
     if (s == nullptr) return nullptr;
     if (sodium_mlock(dek, CIPHER_KEY_BYTES) != 0) {
@@ -60,13 +58,13 @@ CipherStatus cipher_encrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     header[MAGIC_LEN] = (unsigned char)FORMAT_VERSION;
 
     unsigned char dek[CIPHER_KEY_BYTES];
-    CipherStream *s = stream_open(header, dek);
+    CipherStream *s = stream_alloc(header, dek);
     if (s == nullptr) return CIPHER_ERR_ALLOC;
 
-    CipherStatus status = CIPHER_ERR_ENCRYPT;
     randombytes_buf(dek, sizeof dek);
     randombytes_buf(header + WRAP_NONCE_OFFSET, WRAP_NONCE_BYTES);
 
+    CipherStatus status = CIPHER_ERR_ENCRYPT;
     unsigned long long wrapped_len = 0;
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(header + WRAPPED_DEK_OFFSET, &wrapped_len,
                                                    dek, sizeof dek, s->ad, AD_LEN,
@@ -112,7 +110,7 @@ CipherStatus cipher_decrypt_begin(const unsigned char kek[CIPHER_KEY_BYTES],
     if (header[MAGIC_LEN] != FORMAT_VERSION) return CIPHER_ERR_VERSION;
 
     unsigned char dek[CIPHER_KEY_BYTES];
-    CipherStream *s = stream_open(header, dek);
+    CipherStream *s = stream_alloc(header, dek);
     if (s == nullptr) return CIPHER_ERR_ALLOC;
 
     CipherStatus status = CIPHER_ERR_AUTH;
@@ -147,11 +145,9 @@ CipherStatus cipher_decrypt_chunk(CipherStream *stream,
     unsigned long long mlen = 0;
     unsigned char tag = 0;
     if (crypto_secretstream_xchacha20poly1305_pull(&stream->state, out, &mlen, &tag,
-                                                   in, in_len, stream->ad, AD_LEN) != 0) {
-        return CIPHER_ERR_AUTH;
-    }
-    if (tag != crypto_secretstream_xchacha20poly1305_TAG_FINAL &&
-        tag != crypto_secretstream_xchacha20poly1305_TAG_MESSAGE) {
+                                                   in, in_len, stream->ad, AD_LEN) != 0 ||
+        (tag != crypto_secretstream_xchacha20poly1305_TAG_FINAL &&
+         tag != crypto_secretstream_xchacha20poly1305_TAG_MESSAGE)) {
         return CIPHER_ERR_AUTH;
     }
 
@@ -183,8 +179,7 @@ const char *cipher_strerror(CipherStatus status) {
         [CIPHER_ERR_VERSION] = "unsupported file format version",
         [CIPHER_ERR_AUTH]    = "wrong key, or the file was modified, corrupted or truncated",
     };
-    if ((unsigned)status < sizeof messages / sizeof messages[0] && messages[status] != nullptr) {
-        return messages[status];
-    }
-    return "unknown error";
+    const size_t idx = (size_t)status;
+    return (idx < sizeof messages / sizeof messages[0] && messages[idx] != nullptr)
+           ? messages[idx] : "unknown error";
 }

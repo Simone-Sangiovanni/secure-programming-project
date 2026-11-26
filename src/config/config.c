@@ -1,4 +1,5 @@
 #include "config.h"
+
 #include <cjson/cJSON.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -7,10 +8,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "../validate/validate.h"
+
 #define CONFIG_MAX_FILE_SIZE (64L * 1024L)
 #define CONFIG_DEFAULT_KDF   "argon2id"
-
-/* ---------- internal helpers ---------- */
 
 static bool copy_str(char *dst, size_t dst_size, const char *src) {
     const int n = snprintf(dst, dst_size, "%s", src);
@@ -20,17 +21,6 @@ static bool copy_str(char *dst, size_t dst_size, const char *src) {
 static bool read_json_str(const cJSON *json, const char *key, char *dst, size_t dst_size) {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(json, key);
     return copy_str(dst, dst_size, cJSON_IsString(item) ? item->valuestring : "");
-}
-
-static bool is_valid_path(const char *path, bool allow_trailing_slash) {
-    if (path == nullptr || path[0] != '/') return false;
-    const size_t len = strlen(path);
-    if (!allow_trailing_slash && path[len - 1] == '/') return false;
-
-    return strstr(path, "/../") == nullptr &&
-           strstr(path, "/./") == nullptr &&
-           !(len >= 3 && strcmp(path + len - 3, "/..") == 0) &&
-           !(len >= 2 && strcmp(path + len - 2, "/.") == 0);
 }
 
 static void strip_trailing_slashes(char *path) {
@@ -45,7 +35,6 @@ static ConfigStatus read_file(const char *path, char **out, size_t *out_len) {
 
     ConfigStatus status = CONFIG_ERR_IO;
     char *buf = nullptr;
-
     if (fseek(f, 0, SEEK_END) == 0) {
         const long size = ftell(f);
         if (size > CONFIG_MAX_FILE_SIZE) {
@@ -61,7 +50,6 @@ static ConfigStatus read_file(const char *path, char **out, size_t *out_len) {
             }
         }
     }
-
     free(buf);
     (void)fclose(f);
     return status;
@@ -71,7 +59,7 @@ static ConfigStatus write_atomic(const char *file_path, const char *text) {
     const char *slash = strrchr(file_path, '/');
     const int dir_len = (slash != nullptr) ? (int)(slash - file_path + 1) : 0;
 
-    char tmp_path[4096 + 32];
+    char tmp_path[VALIDATE_PATH_MAX + 32];
     const int n = snprintf(tmp_path, sizeof tmp_path, "%.*s.sfm-tmp-XXXXXX", dir_len, file_path);
     if (n < 0 || (size_t)n >= sizeof tmp_path) return CONFIG_ERR_IO;
 
@@ -91,18 +79,21 @@ static ConfigStatus write_atomic(const char *file_path, const char *text) {
         done += (size_t)w;
     }
 
-    if (ok && fsync(fd) != 0) ok = false;
-    if (close(fd) != 0) ok = false;
-    if (ok && rename(tmp_path, file_path) != 0) ok = false;
-
+    if (ok && (fsync(fd) != 0 || close(fd) != 0)) {
+        (void)unlink(tmp_path);
+        return CONFIG_ERR_IO;
+    }
     if (!ok) {
+        (void)close(fd);
+        (void)unlink(tmp_path);
+        return CONFIG_ERR_IO;
+    }
+    if (rename(tmp_path, file_path) != 0) {
         (void)unlink(tmp_path);
         return CONFIG_ERR_IO;
     }
     return CONFIG_OK;
 }
-
-/* ---------- public API ---------- */
 
 bool config_is_first_run(const SfmConfig *cfg) {
     return cfg == nullptr || cfg->salt[0] == '\0' || cfg->verifier[0] == '\0';
@@ -121,7 +112,6 @@ ConfigStatus config_set_defaults(SfmConfig *cfg, const char *config_path,
         !copy_str(tmp.config_path, sizeof tmp.config_path, config_path)) {
         return CONFIG_ERR_INVALID;
     }
-
     strip_trailing_slashes(tmp.vault_path);
     *cfg = tmp;
     return CONFIG_OK;
@@ -156,9 +146,9 @@ ConfigStatus load_config(const char *file_path, SfmConfig *cfg) {
         return CONFIG_ERR_INVALID;
     }
 
-    if (!is_valid_path(tmp.vault_path, true) ||
-        !is_valid_path(tmp.log_path, false) ||
-        !is_valid_path(tmp.config_path, false)) {
+    if (tmp.vault_path[0] != '/' || validate_has_traversal(tmp.vault_path) ||
+        validate_absolute_path(tmp.log_path) != VALIDATE_OK ||
+        validate_absolute_path(tmp.config_path) != VALIDATE_OK) {
         return CONFIG_ERR_INVALID;
     }
     strip_trailing_slashes(tmp.vault_path);
