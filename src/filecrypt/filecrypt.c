@@ -57,33 +57,26 @@ FileCryptResult filecrypt_encrypt(const unsigned char kek[CIPHER_KEY_BYTES],
     CipherStatus cs = cipher_encrypt_begin(kek, &ctx.stream, header);
     if (cs != CIPHER_OK) { res = cipher_err(cs); goto done; }
 
-    if ((fs = fileio_writer_create(out_path, &ctx.out)) != FILEIO_OK ||
-        (fs = fileio_writer_write(ctx.out, header, sizeof header)) != FILEIO_OK) {
-        res = io_err(fs, true);
-        goto done;
-    }
+    fs = fileio_writer_create(out_path, &ctx.out);
+    if (fs == FILEIO_OK) fs = fileio_writer_write(ctx.out, header, sizeof header);
+    if (fs != FILEIO_OK) { res = io_err(fs, true); goto done; }
 
     for (bool last = false; !last;) {
         const size_t want = remaining < CIPHER_CHUNK_SIZE ? (size_t)remaining : CIPHER_CHUNK_SIZE;
         size_t got = 0, enc_len = 0;
 
-        if ((fs = fileio_reader_read(ctx.in, ctx.plain, want, &got)) != FILEIO_OK) {
-            res = io_err(fs, false);
-            goto done;
-        }
+        fs = fileio_reader_read(ctx.in, ctx.plain, want, &got);
+        if (fs != FILEIO_OK) { res = io_err(fs, false); goto done; }
         if (got != want) { res = io_err(FILEIO_ERR_READ, false); goto done; }
 
         remaining -= want;
         last = (remaining == 0);
 
-        if ((cs = cipher_encrypt_chunk(ctx.stream, ctx.plain, want, last, ctx.enc, &enc_len)) != CIPHER_OK) {
-            res = cipher_err(cs);
-            goto done;
-        }
-        if ((fs = fileio_writer_write(ctx.out, ctx.enc, enc_len)) != FILEIO_OK) {
-            res = io_err(fs, true);
-            goto done;
-        }
+        cs = cipher_encrypt_chunk(ctx.stream, ctx.plain, want, last, ctx.enc, &enc_len);
+        if (cs != CIPHER_OK) { res = cipher_err(cs); goto done; }
+
+        fs = fileio_writer_write(ctx.out, ctx.enc, enc_len);
+        if (fs != FILEIO_OK) { res = io_err(fs, true); goto done; }
     }
 
     fs = fileio_writer_finish(ctx.out);
@@ -109,41 +102,39 @@ FileCryptResult filecrypt_decrypt(const unsigned char kek[CIPHER_KEY_BYTES],
     if (fs != FILEIO_OK) { res = io_err(fs, false); goto done; }
 
     // Validate header before creating any output file.
-    if ((fs = fileio_reader_read(ctx.in, header, sizeof header, &got)) != FILEIO_OK) {
-        res = io_err(fs, false);
-        goto done;
-    }
+    fs = fileio_reader_read(ctx.in, header, sizeof header, &got);
+    if (fs != FILEIO_OK) { res = io_err(fs, false); goto done; }
     if (got != sizeof header) { res = cipher_err(CIPHER_ERR_FORMAT); goto done; }
 
     CipherStatus cs = cipher_decrypt_begin(kek, header, &ctx.stream);
     if (cs != CIPHER_OK) { res = cipher_err(cs); goto done; }
     if (!alloc_buffers(&ctx)) { res = io_err(FILEIO_ERR_ALLOC, false); goto done; }
-    if ((fs = fileio_writer_create(out_path, &ctx.out)) != FILEIO_OK) { res = io_err(fs, true); goto done; }
+
+    fs = fileio_writer_create(out_path, &ctx.out);
+    if (fs != FILEIO_OK) { res = io_err(fs, true); goto done; }
 
     for (bool last = false; !last;) {
         size_t plain_len = 0;
-        if ((fs = fileio_reader_read(ctx.in, ctx.enc, ENC_CHUNK_MAX, &got)) != FILEIO_OK) {
-            res = io_err(fs, false);
-            goto done;
-        }
-        if ((cs = cipher_decrypt_chunk(ctx.stream, ctx.enc, got, ctx.plain, &plain_len, &last)) != CIPHER_OK ||
-            (!last && got != ENC_CHUNK_MAX)) {
+
+        fs = fileio_reader_read(ctx.in, ctx.enc, ENC_CHUNK_MAX, &got);
+        if (fs != FILEIO_OK) { res = io_err(fs, false); goto done; }
+
+        cs = cipher_decrypt_chunk(ctx.stream, ctx.enc, got, ctx.plain, &plain_len, &last);
+        if (cs != CIPHER_OK || (!last && got != ENC_CHUNK_MAX)) {
             res = cipher_err(cs != CIPHER_OK ? cs : CIPHER_ERR_AUTH);
             goto done;
         }
-        if ((fs = fileio_writer_write(ctx.out, ctx.plain, plain_len)) != FILEIO_OK) {
-            res = io_err(fs, true);
-            goto done;
-        }
+
+        fs = fileio_writer_write(ctx.out, ctx.plain, plain_len);
+        if (fs != FILEIO_OK) { res = io_err(fs, true); goto done; }
     }
 
     // Reject trailing bytes after the FINAL chunk.
     unsigned char extra = 0;
     size_t trailing = 0;
-    if ((fs = fileio_reader_read(ctx.in, &extra, 1, &trailing)) != FILEIO_OK) {
-        res = io_err(fs, false);
-        goto done;
-    }
+
+    fs = fileio_reader_read(ctx.in, &extra, 1, &trailing);
+    if (fs != FILEIO_OK) { res = io_err(fs, false); goto done; }
     if (trailing != 0) { res = cipher_err(CIPHER_ERR_AUTH); goto done; }
 
     fs = fileio_writer_finish(ctx.out);
